@@ -1,11 +1,11 @@
 """
-Hallucination detector cho simple-shapes-16x16.
+Hallucination detector cho simple-shapes images.
+Supports 16x16, 64x64, and any width (auto-scales column slices and min area).
 
 Image layout:
-  col 0  x[0:5]  : triangle
-  col 1  x[5:10] : square
-  col 2  x[10:15]: pentagon
-  col 3  x[15:16]: padding (ignored)
+  col 0  x[0 : W//3]       : triangle
+  col 1  x[W//3 : 2*W//3]  : square
+  col 2  x[2*W//3 : 3*W//3]: pentagon
 
 Hallucination cases:
   1. double_col  — >= 2 shapes trong cùng 1 cột
@@ -17,7 +17,7 @@ Detection pipeline (per column):
   3. connectedComponentsWithStats — đếm pixel thực từng blob
      (cv2.contourArea không dùng được vì shapes chỉ 3-9px,
       geometric area của outline nhỏ hơn pixel count thực)
-  4. Đếm blob có pixel_count >= MIN_SHAPE_AREA
+  4. Đếm blob có pixel_count >= min_area (scales with image size)
 
 Public API:
   analyze_image(img_uint8)         → dict
@@ -29,21 +29,43 @@ Public API:
 import cv2
 import numpy as np
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config (defaults for 16x16 backward compat) ───────────────────────────────
 COLUMN_SLICES  = [(0, 5), (5, 10), (10, 15)]
 COLUMN_NAMES   = ["triangle", "square", "pentagon"]
-MIN_SHAPE_AREA = 3    # pixel count tối thiểu để tính là 1 shape thật
+MIN_SHAPE_AREA = 3    # pixel count tối thiểu để tính là 1 shape thật (16x16)
 MIN_CONTRAST   = 15   # max-min trong cột < ngưỡng này → cột trắng/đen thuần → 0 shape
+
+
+def _get_col_config(img_width: int):
+    """
+    Compute column slices and min_area for any image width.
+    Scales proportionally from 16x16 baseline (col_width=5, min_area=3).
+
+    Returns:
+        slices   : list of (x_start, x_end) for each of the 3 columns
+        min_area : minimum pixel count to count as a real shape
+    """
+    col_width = img_width // 3
+    slices = [
+        (0,             col_width),
+        (col_width,     2 * col_width),
+        (2 * col_width, img_width),   # dùng img_width để không bỏ sót pixel cuối
+    ]
+    # Scale: 3 px @ 16px width → ~75 px @ 64px width
+    min_area = max(3, int(3 * (img_width / 16) ** 2))
+    return slices, min_area
 
 
 # ── Core detection ────────────────────────────────────────────────────────────
 
-def count_shapes_in_column(col_uint8: np.ndarray) -> int:
+def count_shapes_in_column(col_uint8: np.ndarray,
+                           min_area: int = MIN_SHAPE_AREA) -> int:
     """
     Đếm số shape riêng biệt trong 1 cột grayscale.
 
     Args:
-        col_uint8: (H, W) uint8, ví dụ (16, 5).
+        col_uint8: (H, W) uint8, ví dụ (16, 5) or (64, 21).
+        min_area : minimum pixel count to count as a real shape.
 
     Returns:
         Số shape đếm được (0, 1, 2, ...).
@@ -61,16 +83,16 @@ def count_shapes_in_column(col_uint8: np.ndarray) -> int:
     # stats[0] = background; stats[1:] = foreground blobs
     return sum(
         1 for i in range(1, num_labels)
-        if stats[i, cv2.CC_STAT_AREA] >= MIN_SHAPE_AREA
+        if stats[i, cv2.CC_STAT_AREA] >= min_area
     )
 
 
 def analyze_image(img_uint8: np.ndarray) -> dict:
     """
-    Phân tích 1 ảnh.
+    Phân tích 1 ảnh (16x16, 64x64, or any size).
 
     Args:
-        img_uint8: (16, 16, 3) uint8 RGB.
+        img_uint8: (H, W, 3) uint8 RGB.
 
     Returns:
         {
@@ -84,11 +106,14 @@ def analyze_image(img_uint8: np.ndarray) -> dict:
           }
         }
     """
+    img_width = img_uint8.shape[1]
+    col_slices, min_area = _get_col_config(img_width)
+
     gray = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2GRAY)
 
     col_blobs = {
-        name: count_shapes_in_column(gray[:, c0:c1])
-        for (c0, c1), name in zip(COLUMN_SLICES, COLUMN_NAMES)
+        name: count_shapes_in_column(gray[:, c0:c1], min_area)
+        for (c0, c1), name in zip(col_slices, COLUMN_NAMES)
     }
 
     total_shapes = sum(col_blobs.values())
