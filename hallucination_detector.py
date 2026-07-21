@@ -34,6 +34,14 @@ COLUMN_SLICES  = [(0, 5), (5, 10), (10, 15)]
 COLUMN_NAMES   = ["triangle", "square", "pentagon"]
 MIN_SHAPE_AREA = 3    # pixel count tối thiểu để tính là 1 shape thật (16x16)
 MIN_CONTRAST   = 15   # max-min trong cột < ngưỡng này → cột trắng/đen thuần → 0 shape
+MIN_ABS_BRIGHTNESS = 150   # cột phải có ít nhất 1 pixel đủ sáng (~trắng thật) mới
+                            # được coi là CÓ THỂ chứa shape. Shape thật luôn có
+                            # pixel gần 255; ảnh model sinh bị nhoè/nhiễu (noise mờ,
+                            # không có shape) vẫn có thể đạt contrast tương đối > 15
+                            # (vd max=51,min=6) dù không hề gần trắng — nếu chỉ xét
+                            # contrast tương đối, Otsu sẽ tách nhiễu đó thành nhiều
+                            # "blob" giả (double_col ảo). Check tuyệt đối này chặn
+                            # trước khi vào Otsu.
 
 
 def _get_col_config(img_width: int):
@@ -70,6 +78,9 @@ def count_shapes_in_column(col_uint8: np.ndarray,
     Returns:
         Số shape đếm được (0, 1, 2, ...).
     """
+    if int(col_uint8.max()) < MIN_ABS_BRIGHTNESS:
+        return 0   # không có pixel nào đủ sáng để là shape thật -> chắc chắn 0 shape
+
     contrast = int(col_uint8.max()) - int(col_uint8.min())
     if contrast < MIN_CONTRAST:
         return 0

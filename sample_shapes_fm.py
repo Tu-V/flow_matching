@@ -185,17 +185,21 @@ def run(args):
         device = torch.device("cpu")
     print(f"Device: {device}")
 
-    # ── dirs ──
-    hall_dir  = os.path.join(ANALYSIS_DIR, "hallucinations")
-    norm_dir  = os.path.join(ANALYSIS_DIR, "normal")
-    trace_dir = os.path.join(ANALYSIS_DIR, "traces")
-    for d in [hall_dir, norm_dir, trace_dir]:
-        os.makedirs(d, exist_ok=True)
-
     # ── model ──
     ckpt_path = args.ckpt or _latest_ckpt()
     model     = load_model(ckpt_path, device)
     wrapper   = UNetVelocityWrapper(model)
+
+    # ── dirs ── (suy ra từ checkpoint đang dùng, vd .../shapes_fm_output_mahal_reg/checkpoints/xxx.pt
+    #             -> .../shapes_fm_output_mahal_reg/hallucination_analysis)
+    run_root     = os.path.dirname(os.path.dirname(os.path.abspath(ckpt_path)))
+    analysis_dir = os.path.join(run_root, "hallucination_analysis")
+    hall_dir  = os.path.join(analysis_dir, "hallucinations")
+    norm_dir  = os.path.join(analysis_dir, "normal")
+    trace_dir = os.path.join(analysis_dir, "traces")
+    for d in [hall_dir, norm_dir, trace_dir]:
+        os.makedirs(d, exist_ok=True)
+    print(f"Output -> {analysis_dir}")
 
     # ─────────────────────────────────────────────────────────────
     # PASS 1 — bulk sampling, detect hallucinations
@@ -367,7 +371,7 @@ def run(args):
     # ─────────────────────────────────────────────────────────────
     # Summary stats file
     # ─────────────────────────────────────────────────────────────
-    stats_path = os.path.join(ANALYSIS_DIR, "stats.txt")
+    stats_path = os.path.join(analysis_dir, "stats.txt")
     with open(stats_path, "w") as f:
         f.write(f"Checkpoint : {os.path.basename(ckpt_path)}\n")
         f.write(f"Total      : {args.n_total}\n")
