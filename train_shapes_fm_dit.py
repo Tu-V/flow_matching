@@ -21,8 +21,9 @@ Usage:
     # Resume từ checkpoint mới nhất
     python train_shapes_fm_dit.py --resume latest --epochs 1000
 
-    # Đổi cỡ model (mặc định ~ tương đương param count với UNet baseline ~9M)
-    python train_shapes_fm_dit.py --hidden_size 256 --depth 6 --num_heads 4 --patch_size 2
+    # Đổi cỡ model (mặc định hiện tại ~48M params; bản nhỏ tương đương UNet baseline ~9M:
+    #   --hidden_size 256 --depth 6 --num_heads 4 --patch_size 2)
+    python train_shapes_fm_dit.py --hidden_size 512 --depth 10 --num_heads 8 --patch_size 2
 
 --epochs luôn là TỔNG số epoch mục tiêu (không phải số epoch thêm vào).
 """
@@ -58,7 +59,7 @@ DATA_DIR = os.path.join(
     "simple-datasets",
     "simple-shapes-5k-16x16",
 )
-OUTPUT_DIR = os.path.join(REPO_ROOT, "shapes_fm_dit_output")
+OUTPUT_DIR = os.path.join(REPO_ROOT, "shapes_fm_dit_large_output")
 CKPT_DIR = os.path.join(OUTPUT_DIR, "checkpoints")
 SAMPLE_DIR = os.path.join(OUTPUT_DIR, "samples")
 
@@ -482,10 +483,11 @@ def parse_args():
     p.add_argument("--lr",           type=float, default=1e-4)
     p.add_argument("--resume",       type=str,   default=None,
                    help="Path checkpoint để resume, hoặc 'latest'")
-    # DiT hyperparams (~9M params với default, tương đương UNet baseline)
-    p.add_argument("--hidden_size",  type=int,   default=256)
-    p.add_argument("--depth",        type=int,   default=6)
-    p.add_argument("--num_heads",    type=int,   default=4)
+    # DiT hyperparams (~48M params với default — bản "lớn" để so sánh scale;
+    # bản gốc ~7.4M dùng --hidden_size 256 --depth 6 --num_heads 4)
+    p.add_argument("--hidden_size",  type=int,   default=512)
+    p.add_argument("--depth",        type=int,   default=10)
+    p.add_argument("--num_heads",    type=int,   default=8)
     p.add_argument("--patch_size",   type=int,   default=2,
                    help="Phải chia hết 16 (1, 2, 4, 8, 16). patch=2 -> 64 token.")
     p.add_argument("--mlp_ratio",    type=float, default=4.0)
