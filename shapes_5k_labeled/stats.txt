@@ -1,0 +1,25 @@
+Nguồn: /Users/admin/workspace/diffusion_hallu/flow_matching/../neurips-2024-diffusion-model-hallucination/simple-datasets/simple-shapes-5k-16x16
+Tổng số ảnh: 5000
+
+Định nghĩa nhãn (dựa trên tập cột có >=1 shape):
+  class 0: empty (KHONG co shape nao - anomaly, khong nam trong 7 class yeu cau)
+  class 1: chi cot 1 (triangle)
+  class 2: chi cot 2 (square)
+  class 3: chi cot 3 (pentagon)
+  class 4: cot 1 + cot 2 (triangle + square)
+  class 5: cot 1 + cot 3 (triangle + pentagon)
+  class 6: cot 2 + cot 3 (square + pentagon)
+  class 7: ca 3 cot (triangle + square + pentagon)
+
+Thống kê số lượng mỗi lớp:
+  class 0:     0  ( 0.00%)
+  class 1:   719  (14.38%)
+  class 2:   694  (13.88%)
+  class 3:   699  (13.98%)
+  class 4:   705  (14.10%)
+  class 5:   703  (14.06%)
+  class 6:   735  (14.70%)
+  class 7:   745  (14.90%)
+
+Anomaly — ảnh có >=2 shape trong cùng 1 cột (double-col): 0
+  (vẫn được gán nhãn theo tập cột có mặt như bình thường, chỉ đánh dấu double_col_flag=1 trong labels.csv)
