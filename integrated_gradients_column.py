@@ -66,6 +66,21 @@ def euler_rollout_batch_grad(wrapper, x_init_batch, steps, device):
     return x
 
 
+def euler_rollout_batch_grad_with_t(wrapper, x_init_batch, t_steps):
+    """
+    Giống euler_rollout_batch_grad, NHƯNG t ở mỗi bước là 1 leaf tensor
+    requires_grad=True (t_steps[i], scalar) thay vì hằng số float -> backward
+    lấy được cả gradient theo t, không chỉ theo x.
+    """
+    dt = 1.0 / len(t_steps)
+    x = x_init_batch
+    for t_i in t_steps:
+        t_tensor = t_i.expand(x.shape[0])
+        v = wrapper(x, t_tensor)
+        x = x + dt * v
+    return x
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case_dir", required=True)
@@ -117,13 +132,22 @@ def main():
     x_T_rep = x_T.repeat(m, 1, 1, 1)
     x_alpha = (alphas * x_T_rep).clone().requires_grad_(True)
 
+    # t mỗi bước ODE là 1 leaf tensor requires_grad=True (thay vì hằng số) -> backward
+    # lấy được luôn cả gradient theo t, không chỉ theo x (xem euler_rollout_batch_grad_with_t).
+    t_values = [i / args.steps for i in range(args.steps)]
+    t_steps = [torch.tensor(tv, device=device, requires_grad=True) for tv in t_values]
+
     print(f"\nForward ODE (m={m} alpha, steps={args.steps}) ...")
-    x_0_alpha = euler_rollout_batch_grad(wrapper, x_alpha, args.steps, device)   # (m,3,16,16)
-    x_0_alpha_gray = x_0_alpha.mean(dim=1)                                       # (m,16,16)
+    x_0_alpha = euler_rollout_batch_grad_with_t(wrapper, x_alpha, t_steps)   # (m,3,16,16)
+    x_0_alpha_gray = x_0_alpha.mean(dim=1)                                   # (m,16,16)
 
     # ── IG riêng cho từng pixel target (r, c) trong cột ────────────────────────
     print(f"Backward riêng cho {IMG_SIZE*col_w} pixel target ...")
     IG_per_pixel = np.zeros((IMG_SIZE, col_w, 3, IMG_SIZE, IMG_SIZE), dtype=np.float32)
+    # Độ nhạy của mỗi pixel target theo t ở TỪNG bước ODE (không phải IG chuẩn — không có
+    # baseline tự nhiên cho t — mà là gradient trung bình qua m đường alpha, xem docstring
+    # euler_rollout_batch_grad_with_t và giải thích trong report cuối file).
+    IG_per_pixel_time = np.zeros((IMG_SIZE, col_w, args.steps), dtype=np.float32)
 
     n_pixels = IMG_SIZE * col_w
     k = 0
@@ -132,21 +156,32 @@ def main():
             k += 1
             is_last = (k == n_pixels)
             F_pixel = x_0_alpha_gray[:, r, t0 + c]              # (m,)
-            grad_pixel = torch.autograd.grad(
-                F_pixel.sum(), x_alpha, retain_graph=not is_last
-            )[0]                                                 # (m,3,16,16)
+            grads = torch.autograd.grad(
+                F_pixel.sum(), [x_alpha] + t_steps, retain_graph=not is_last
+            )
+            grad_pixel = grads[0]                                 # (m,3,16,16)
+            grad_t = grads[1:]                                    # tuple of `steps` scalars
+
             avg_grad = grad_pixel.mean(dim=0)                     # (3,16,16)
             IG_pixel = (x_T[0] * avg_grad).detach().cpu().numpy()
             IG_per_pixel[r, c] = IG_pixel
+
+            # Mỗi t_steps[i] là 1 scalar DÙNG CHUNG cho cả m đường alpha -> gradient trả về
+            # đã là TỔNG đóng góp qua m đường -> chia m để lấy trung bình, cùng chuẩn hoá với
+            # avg_grad ở trên (mean qua m).
+            IG_per_pixel_time[r, c] = np.array(
+                [g.item() / m for g in grad_t], dtype=np.float32
+            )
 
     print("Xong.")
 
     # ── Lưu số liệu đầy đủ ────────────────────────────────────────────────────
     np.savez(os.path.join(out_dir, f"ig_per_pixel_col{args.target_col}.npz"),
-             IG_per_pixel=IG_per_pixel, target_col=args.target_col,
-             target_name=target_name, t0=t0, t1=t1)
+             IG_per_pixel=IG_per_pixel, IG_per_pixel_time=IG_per_pixel_time,
+             t_values=np.array(t_values, dtype=np.float32),
+             target_col=args.target_col, target_name=target_name, t0=t0, t1=t1)
     print(f"Saved: {os.path.join(out_dir, f'ig_per_pixel_col{args.target_col}.npz')}  "
-          f"shape={IG_per_pixel.shape}")
+          f"shape={IG_per_pixel.shape}  (+ IG_per_pixel_time shape={IG_per_pixel_time.shape})")
 
     # ── Vẽ: grid 16 hàng x col_w cột, mỗi ô là 1 saliency map |IG| (16x16) ────
     IG_mean_abs_per_pixel = np.abs(IG_per_pixel).mean(axis=2)   # (16,col_w,16,16) - TB 3 kênh
@@ -185,7 +220,15 @@ def main():
     for name_i, score in zone_scores.items():
         print(f"  noise {name_i:10s}: {score:10.5f}  ({100*score/total:5.1f}%)")
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+    # ── Tóm tắt độ nhạy theo t: trung bình |grad_t| qua toàn bộ pixel target, mỗi bước ODE ──
+    time_sensitivity = np.abs(IG_per_pixel_time).mean(axis=(0, 1))   # (steps,)
+    peak_step = int(np.argmax(time_sensitivity))
+    print(f"\nĐộ nhạy theo t (trung bình |dF/dt_i| qua {n_pixels} pixel target, mỗi bước ODE):")
+    print(f"  nhạy nhất tại step {peak_step}/{args.steps}  (t={t_values[peak_step]:.3f})  "
+          f"giá trị={time_sensitivity[peak_step]:.5f}")
+    print(f"  step đầu (t~0): {time_sensitivity[0]:.5f}   step cuối (t~1): {time_sensitivity[-1]:.5f}")
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
     im = axes[0].imshow(IG_overall, cmap="hot")
     for x in [5, 10]:
         axes[0].axvline(x=x - 0.5, color="cyan", linewidth=1)
@@ -195,11 +238,35 @@ def main():
     axes[1].bar(list(zone_scores.keys()), list(zone_scores.values()),
                color=["tomato" if n == target_name else "steelblue" for n in zone_scores])
     axes[1].set_title("Tổng |IG| theo vùng noise", fontsize=9)
+
+    axes[2].plot(t_values, time_sensitivity, marker="o", markersize=3, color="darkorange")
+    axes[2].axvline(x=t_values[peak_step], color="red", linestyle="--", linewidth=1,
+                    label=f"nhạy nhất t={t_values[peak_step]:.2f}")
+    axes[2].set_xlabel("t (0=noise, 1=data)", fontsize=8)
+    axes[2].set_ylabel("|dF/dt|  trung bình qua pixel target", fontsize=8)
+    axes[2].set_title(f"Độ nhạy output theo THỜI ĐIỂM t\ntrong quá trình ODE (cột '{target_name}')", fontsize=9)
+    axes[2].legend(fontsize=7)
     plt.tight_layout()
     summary_path = os.path.join(out_dir, f"ig_summary_col{args.target_col}.png")
     plt.savefig(summary_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved: {summary_path}")
+
+    # ── Heatmap chi tiết: từng pixel target (hàng) x từng bước ODE (cột) ──────
+    IG_time_flat = np.abs(IG_per_pixel_time).reshape(n_pixels, args.steps)   # (n_pixels, steps)
+    fig, ax = plt.subplots(figsize=(max(6, args.steps * 0.25), max(4, n_pixels * 0.15)))
+    im = ax.imshow(IG_time_flat, cmap="hot", aspect="auto",
+                   extent=[t_values[0], t_values[-1], n_pixels, 0])
+    ax.set_xlabel("t (0=noise, 1=data)")
+    ax.set_ylabel(f"pixel target (0..{n_pixels-1}, hàng-ưu-tiên trong cột '{target_name}')")
+    ax.set_title(f"{os.path.basename(args.case_dir)} — |dF_pixel/dt| theo từng bước ODE\n"
+                f"(mỗi hàng = 1 pixel output trong cột '{target_name}')", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="|dF/dt|")
+    plt.tight_layout()
+    time_heatmap_path = os.path.join(out_dir, f"ig_time_sensitivity_col{args.target_col}.png")
+    plt.savefig(time_heatmap_path, dpi=140, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {time_heatmap_path}")
 
 
 if __name__ == "__main__":
