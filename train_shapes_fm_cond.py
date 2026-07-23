@@ -169,9 +169,6 @@ def train(args):
     path = CondOTProbPath()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=args.lr * 0.1
-    )
 
     start_epoch = 1
     if args.resume:
@@ -180,13 +177,27 @@ def train(args):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "scheduler_state_dict" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt["epoch"] + 1
         print(f"Resumed at epoch {ckpt['epoch']}  loss={ckpt.get('loss', float('nan')):.5f}")
         if start_epoch > args.epochs:
             print(f"Đã train đủ {args.epochs} epochs rồi. Tăng --epochs nếu muốn train thêm.")
             return
+
+        # Cosine schedule MỚI cho phần train tiếp — KHÔNG load lại scheduler_state_dict cũ.
+        # Lý do: CosineAnnealingLR.state_dict() lưu cả T_max; nếu --epochs đổi (vd 1000->2000)
+        # mà vẫn load state cũ, T_max sẽ bị ghi đè về giá trị cũ (1000) trong khi last_epoch
+        # đã vượt qua nó -> LR nhảy vọt giữa chừng thay vì giảm mượt. Tạo scheduler mới, chạy
+        # từ đúng LR hiện tại (đã load qua optimizer_state_dict) giảm tiếp xuống eta_min qua
+        # đúng số epoch còn lại -> không bị nhảy LR.
+        remaining_epochs = args.epochs - start_epoch + 1
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=remaining_epochs, eta_min=args.lr * 0.1
+        )
+        print(f"  Scheduler mới: cosine LR hiện tại -> eta_min qua {remaining_epochs} epoch còn lại")
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.lr * 0.1
+        )
 
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
