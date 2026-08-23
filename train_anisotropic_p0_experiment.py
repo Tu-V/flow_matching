@@ -178,7 +178,7 @@ def train_one(dataset: ShapesDataset, p0_type: str, sigma, args, device) -> UNet
     return model
 
 
-# ── Sample n_total ảnh + đếm hallucination ────────────────────────────────────
+# ── Sample n_total ảnh (1 lần) + đếm hallucination ─────────────────────────────
 @torch.no_grad()
 def sample_and_analyze(model: UNetModel, sigma, device, n_total: int, steps: int,
                         batch_size: int) -> dict:
@@ -206,6 +206,40 @@ def sample_and_analyze(model: UNetModel, sigma, device, n_total: int, steps: int
     return summarize(all_analyses)
 
 
+# ── Lặp lại sampling n_repeats lần (mỗi lần n_total ảnh MỚI, x_init random khác
+# nhau), tính mean/std của hallucination rate — đo độ nhiễu (variance) của ước
+# lượng do số mẫu hữu hạn, không phải chỉ 1 con số duy nhất ──────────────────────
+def sample_and_analyze_repeated(model: UNetModel, sigma, device, n_total: int,
+                                 steps: int, batch_size: int, n_repeats: int) -> dict:
+    runs = []
+    for rep in range(1, n_repeats + 1):
+        print(f"  -- repeat {rep}/{n_repeats} --")
+        s = sample_and_analyze(model, sigma, device, n_total, steps, batch_size)
+        runs.append(s)
+        print(f"     hall={100*s['hall_rate']:.4f}%  "
+              f"(empty={100*s['n_empty']/s['n_total']:.4f}%  "
+              f"double_col={100*s['n_double_col']/s['n_total']:.4f}%)")
+
+    hall_rates   = np.array([r["hall_rate"] for r in runs]) * 100.0
+    empty_rates  = np.array([r["n_empty"] / r["n_total"] for r in runs]) * 100.0
+    double_rates = np.array([r["n_double_col"] / r["n_total"] for r in runs]) * 100.0
+
+    return {
+        "n_repeats": n_repeats,
+        "n_total_per_repeat": n_total,
+        "runs": runs,
+        "hall_rate_pct_list":   hall_rates.tolist(),
+        "empty_rate_pct_list":  empty_rates.tolist(),
+        "double_rate_pct_list": double_rates.tolist(),
+        "hall_rate_mean":   float(hall_rates.mean()),
+        "hall_rate_std":    float(hall_rates.std(ddof=1)) if n_repeats > 1 else 0.0,
+        "empty_rate_mean":  float(empty_rates.mean()),
+        "empty_rate_std":   float(empty_rates.std(ddof=1)) if n_repeats > 1 else 0.0,
+        "double_rate_mean": float(double_rates.mean()),
+        "double_rate_std":  float(double_rates.std(ddof=1)) if n_repeats > 1 else 0.0,
+    }
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Isotropic vs anisotropic p0: hallucination rate")
     p.add_argument("--dataset_sizes", type=str, default="5000,10000,20000,50000")
@@ -219,6 +253,9 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--log_every", type=int, default=2000)
     p.add_argument("--n_sample_total", type=int, default=100000)
+    p.add_argument("--n_repeats", type=int, default=5,
+                   help="So lan lap lai sampling n_sample_total anh MOI (x_init random khac "
+                        "nhau moi lan) de tinh mean/std cua hallucination rate")
     p.add_argument("--sample_steps", type=int, default=100)
     p.add_argument("--sample_batch_size", type=int, default=512)
     p.add_argument("--save_ckpt", action="store_true", default=True)
@@ -270,29 +307,34 @@ def main():
                 }, ckpt_path)
                 print(f"  Saved: {ckpt_path}")
 
-            print(f"\nSampling {args.n_sample_total} ảnh (n={n_size}, p0={p0_type}, "
-                  f"steps={args.sample_steps}) ...")
-            s = sample_and_analyze(model, sigma, device, args.n_sample_total,
-                                    args.sample_steps, args.sample_batch_size)
+            print(f"\nSampling {args.n_sample_total} ảnh × {args.n_repeats} lần lặp "
+                  f"(n={n_size}, p0={p0_type}, steps={args.sample_steps}) ...")
+            s = sample_and_analyze_repeated(model, sigma, device, args.n_sample_total,
+                                             args.sample_steps, args.sample_batch_size,
+                                             args.n_repeats)
 
             print(f"  n={n_size:6d}  p0={p0_type:12s}  "
-                  f"hall={100*s['hall_rate']:.3f}%  "
-                  f"(empty={100*s['n_empty']/s['n_total']:.3f}%  "
-                  f"double_col={100*s['n_double_col']/s['n_total']:.3f}%)")
+                  f"hall={s['hall_rate_mean']:.3f}% ± {s['hall_rate_std']:.3f}%  "
+                  f"(empty={s['empty_rate_mean']:.3f}%±{s['empty_rate_std']:.3f}%  "
+                  f"double_col={s['double_rate_mean']:.3f}%±{s['double_rate_std']:.3f}%)")
 
             results.append({"n_data": n_size, "p0_type": p0_type, **s})
 
-            # lưu stats.txt riêng cho run này
+            # lưu stats.txt riêng cho run này (per-repeat + mean/std)
             run_dir = os.path.join(OUTPUT_DIR, f"n{n_size}_{p0_type}")
             os.makedirs(run_dir, exist_ok=True)
             with open(os.path.join(run_dir, "stats.txt"), "w") as f:
                 f.write(f"n_data={n_size}  p0_type={p0_type}  epsilon={args.epsilon}\n")
-                f.write(f"total_steps={args.total_steps}  n_sample_total={s['n_total']}  "
-                        f"sample_steps={args.sample_steps}\n\n")
-                f.write(f"Hallucination : {s['n_hall']} ({100*s['hall_rate']:.4f}%)\n")
-                f.write(f"  empty img   : {s['n_empty']} ({100*s['n_empty']/s['n_total']:.4f}%)\n")
-                f.write(f"  double col  : {s['n_double_col']} ({100*s['n_double_col']/s['n_total']:.4f}%)\n")
-                f.write(f"Normal        : {s['n_normal']} ({100*s['n_normal']/s['n_total']:.4f}%)\n")
+                f.write(f"total_steps={args.total_steps}  n_sample_total/repeat={args.n_sample_total}  "
+                        f"n_repeats={args.n_repeats}  sample_steps={args.sample_steps}\n\n")
+                f.write("Per-repeat hallucination rate (%):\n")
+                for rep, hr in enumerate(s["hall_rate_pct_list"], start=1):
+                    f.write(f"  repeat {rep}: hall={hr:.4f}%  "
+                            f"empty={s['empty_rate_pct_list'][rep-1]:.4f}%  "
+                            f"double_col={s['double_rate_pct_list'][rep-1]:.4f}%\n")
+                f.write(f"\nHallucination : mean={s['hall_rate_mean']:.4f}%  std={s['hall_rate_std']:.4f}%\n")
+                f.write(f"  empty img   : mean={s['empty_rate_mean']:.4f}%  std={s['empty_rate_std']:.4f}%\n")
+                f.write(f"  double col  : mean={s['double_rate_mean']:.4f}%  std={s['double_rate_std']:.4f}%\n")
 
             del model
             if device.type == "cuda":
@@ -300,15 +342,18 @@ def main():
 
     # ── Bảng tổng hợp cuối ──
     print(f"\n{'='*80}")
-    print(f"TỔNG HỢP  (n_sample_total={args.n_sample_total}, sample_steps={args.sample_steps}, "
-          f"total_train_steps={args.total_steps}/run, epsilon={args.epsilon})")
+    print(f"TỔNG HỢP  (n_sample_total={args.n_sample_total}/lần × {args.n_repeats} lần lặp, "
+          f"sample_steps={args.sample_steps}, total_train_steps={args.total_steps}/run, "
+          f"epsilon={args.epsilon})")
     print(f"{'='*80}")
-    header = f"{'n_data':>8s} {'p0_type':>12s} {'hall%':>8s} {'empty%':>8s} {'double_col%':>12s}"
+    header = (f"{'n_data':>8s} {'p0_type':>12s} {'hall% mean':>11s} {'hall% std':>10s} "
+              f"{'empty% mean':>12s} {'double_col% mean':>17s}")
     print(header)
     lines = [header]
     for r in results:
-        line = (f"{r['n_data']:8d} {r['p0_type']:>12s} {100*r['hall_rate']:8.4f} "
-                f"{100*r['n_empty']/r['n_total']:8.4f} {100*r['n_double_col']/r['n_total']:12.4f}")
+        line = (f"{r['n_data']:8d} {r['p0_type']:>12s} {r['hall_rate_mean']:11.4f} "
+                f"{r['hall_rate_std']:10.4f} {r['empty_rate_mean']:12.4f} "
+                f"{r['double_rate_mean']:17.4f}")
         print(line)
         lines.append(line)
 
@@ -320,10 +365,10 @@ def main():
             iso = next((r for r in results if r["n_data"] == n_size and r["p0_type"] == "isotropic"), None)
             ani = next((r for r in results if r["n_data"] == n_size and r["p0_type"] == "anisotropic"), None)
             if iso and ani:
-                rel = ("(giảm về 0)" if ani["hall_rate"] == 0 else
-                       f"({100*(ani['hall_rate']-iso['hall_rate'])/max(iso['hall_rate'],1e-12):+.1f}% tương đối)")
-                line = (f"n={n_size}: isotropic={100*iso['hall_rate']:.4f}%  ->  "
-                        f"anisotropic={100*ani['hall_rate']:.4f}%  {rel}")
+                rel = ("(giảm về 0)" if ani["hall_rate_mean"] == 0 else
+                       f"({100*(ani['hall_rate_mean']-iso['hall_rate_mean'])/max(iso['hall_rate_mean'],1e-12):+.1f}% tương đối)")
+                line = (f"n={n_size}: isotropic={iso['hall_rate_mean']:.4f}%±{iso['hall_rate_std']:.4f}%  ->  "
+                        f"anisotropic={ani['hall_rate_mean']:.4f}%±{ani['hall_rate_std']:.4f}%  {rel}")
                 print(line)
                 lines.append(line)
 
