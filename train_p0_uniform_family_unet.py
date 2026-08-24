@@ -28,15 +28,20 @@ Checkpoint lưu ĐỊNH KỲ (--save_every) + cuối cùng, tên có img_size+p0
 đụng nhau giữa các tổ hợp. Tự động RESUME nếu đã có checkpoint (--no_resume để tắt)
 — bỏ qua hoàn toàn nếu đã train đủ total_steps.
 
-CẢNH BÁO CHI PHÍ: mặc định 8 tổ hợp × total_steps (40,000) = 320,000 gradient step +
-8 × 100,000 ảnh × n_repeats (5) sample. Dùng --img_sizes/--dataset_sizes/--p0_types
-để chạy 1 phần trước khi chạy full.
+--total_steps hỗ trợ RIÊNG theo img_size — mặc định "16:40000,64:100000" (16x16
+train 40,000 step, 64x64 train 100,000 step/tổ hợp vì ảnh to hơn cần nhiều step
+hơn); truyền 1 số duy nhất (vd "40000") để áp dụng đều cho mọi img_size.
+
+CẢNH BÁO CHI PHÍ: mặc định 4 tổ hợp×40,000 (16x16) + 4 tổ hợp×100,000 (64x64) =
+560,000 gradient step tổng + 8 × 100,000 ảnh × n_repeats (5) sample. Dùng
+--img_sizes/--dataset_sizes/--p0_types để chạy 1 phần trước khi chạy full.
 
 Usage (máy này chỉ chạy UNet; chạy song song train_p0_uniform_family_dit.py trên
 máy còn lại):
     python train_p0_uniform_family_unet.py
     python train_p0_uniform_family_unet.py --img_sizes 16
-    python train_p0_uniform_family_unet.py --dataset_sizes 5000 --total_steps 5000  # test nhanh
+    python train_p0_uniform_family_unet.py --total_steps 16:40000,64:100000
+    python train_p0_uniform_family_unet.py --dataset_sizes 5000 --total_steps 5000  # test nhanh (moi size)
 """
 
 import argparse
@@ -275,8 +280,10 @@ def parse_args():
     p.add_argument("--img_sizes", type=str, default="16,64")
     p.add_argument("--dataset_sizes", type=str, default="5000,10000")
     p.add_argument("--p0_types", type=str, default="uniform01,uniform_i2")
-    p.add_argument("--total_steps", type=int, default=40000,
-                   help="Tong so gradient step MOI to hop (size,p0,img_size) — CO DINH")
+    p.add_argument("--total_steps", type=str, default="16:40000,64:100000",
+                   help="So gradient step. 1 so ap dung cho MOI img_size (vd '40000'), "
+                        "hoac rieng tung img_size 'img:steps,...' (vd '16:40000,64:100000', "
+                        "mac dinh). Ap dung deu cho moi (size,p0) trong CUNG 1 img_size.")
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--log_every", type=int, default=2000)
@@ -292,19 +299,37 @@ def parse_args():
     return p.parse_args()
 
 
+def parse_total_steps_spec(spec: str, img_sizes: list) -> dict:
+    """'40000' -> {size:40000 cho moi size}. '16:40000,64:100000' -> rieng tung size."""
+    if ":" in spec:
+        d = {}
+        for part in spec.split(","):
+            k, v = part.split(":")
+            d[int(k.strip())] = int(v.strip())
+        missing = [isz for isz in img_sizes if isz not in d]
+        if missing:
+            raise ValueError(f"--total_steps thiếu img_size {missing}: {spec}")
+        return d
+    steps = int(spec)
+    return {isz: steps for isz in img_sizes}
+
+
 def main():
     args = parse_args()
     img_sizes = [int(s) for s in args.img_sizes.split(",")]
     sizes = [int(s) for s in args.dataset_sizes.split(",")]
     p0_types = [s.strip() for s in args.p0_types.split(",")]
+    total_steps_by_size = parse_total_steps_spec(args.total_steps, img_sizes)
 
     device = torch.device("cuda" if torch.cuda.is_available() else
                            ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Device: {device}")
     print(f"arch=unet  img_sizes={img_sizes}  dataset_sizes={sizes}  p0_types={p0_types}")
+    print(f"total_steps theo img_size: {total_steps_by_size}")
     n_combos = len(img_sizes) * len(sizes) * len(p0_types)
-    print(f"Tổng số tổ hợp: {n_combos}  (mỗi tổ hợp {args.total_steps} step + "
-          f"{args.n_sample_total}x{args.n_repeats} ảnh sample)")
+    total_grad_steps = sum(total_steps_by_size[isz] * len(sizes) * len(p0_types) for isz in img_sizes)
+    print(f"Tổng số tổ hợp: {n_combos}  (tổng gradient step ước tính: {total_grad_steps:,} + "
+          f"{n_combos}x{args.n_sample_total}x{args.n_repeats} ảnh sample)")
 
     if "uniform_i2" in p0_types:
         for isz in img_sizes:
@@ -321,6 +346,7 @@ def main():
 
     results = []
     for img_size in img_sizes:
+        args.total_steps = total_steps_by_size[img_size]
         bounds_i2 = make_uniform_i2_bounds(img_size, device) if "uniform_i2" in p0_types else None
 
         for n_size in sizes:
@@ -377,7 +403,7 @@ def main():
     # ── Bảng tổng hợp cuối ──
     print(f"\n{'='*80}")
     print(f"TỔNG HỢP (UNet)  (n_sample_total={args.n_sample_total}/lần × {args.n_repeats} lần lặp, "
-          f"sample_steps={args.sample_steps}, total_train_steps={args.total_steps}/tổ hợp)")
+          f"sample_steps={args.sample_steps}, total_steps theo img_size={total_steps_by_size})")
     print(f"{'='*80}")
     header = (f"{'img':>4s} {'n_data':>7s} {'p0_type':>10s} {'hall% mean':>11s} "
               f"{'hall% std':>10s} {'empty% mean':>12s} {'double_col% mean':>17s}")
