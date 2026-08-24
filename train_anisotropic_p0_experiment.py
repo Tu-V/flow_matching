@@ -158,12 +158,40 @@ def sample_x0(B: int, sigma, img_size: int, device) -> torch.Tensor:
     return z if sigma is None else z * sigma
 
 
-def save_checkpoint(model: UNetModel, ckpt_path: str, **extra):
-    torch.save({"model_state_dict": model.state_dict(), **extra}, ckpt_path)
+def save_checkpoint(model: UNetModel, ckpt_path: str, optimizer=None, scheduler=None, **extra):
+    state = {"model_state_dict": model.state_dict(), **extra}
+    if optimizer is not None:
+        state["optimizer_state_dict"] = optimizer.state_dict()
+    if scheduler is not None:
+        state["scheduler_state_dict"] = scheduler.state_dict()
+    torch.save(state, ckpt_path)
+
+
+def find_resume_checkpoint(ckpt_dir: str, n_size: int, p0_type: str):
+    """Tìm checkpoint TIẾN NHẤT đã có cho (n_size, p0_type) — so sánh checkpoint
+    cuối cùng (unet_n{size}_{p0}.pt, nếu có) với các checkpoint định kỳ
+    (..._step{N}.pt, step đọc thẳng từ tên file, không cần load). Trả về
+    (ckpt_path, step) hoặc None nếu chưa có checkpoint nào."""
+    import glob
+    import re
+
+    best_path, best_step = None, -1
+    final_path = os.path.join(ckpt_dir, f"unet_n{n_size}_{p0_type}.pt")
+    if os.path.isfile(final_path):
+        ckpt = torch.load(final_path, map_location="cpu", weights_only=True)
+        step = ckpt.get("step", ckpt.get("total_steps", 0))
+        if step > best_step:
+            best_step, best_path = step, final_path
+    for p in glob.glob(os.path.join(ckpt_dir, f"unet_n{n_size}_{p0_type}_step*.pt")):
+        m = re.search(r"_step(\d+)\.pt$", p)
+        if m and int(m.group(1)) > best_step:
+            best_step, best_path = int(m.group(1)), p
+    return (best_path, best_step) if best_path is not None else None
 
 
 # ── Train 1 model (n_data, p0_type) — theo STEP (không epoch) để so sánh công bằng
-# giữa các cỡ dataset khác nhau, cùng tổng compute ──────────────────────────────
+# giữa các cỡ dataset khác nhau, cùng tổng compute. Tự động RESUME nếu đã có
+# checkpoint (--no_resume để tắt, luôn train lại từ đầu) ───────────────────────
 def train_one(dataset: ShapesDataset, p0_type: str, sigma, args, device,
               img_size: int, ckpt_dir: str, n_size: int) -> UNetModel:
     model = build_unet().to(device)
@@ -174,19 +202,39 @@ def train_one(dataset: ShapesDataset, p0_type: str, sigma, args, device,
         optimizer, T_max=args.total_steps, eta_min=args.lr * 0.1
     )
 
+    start_step = 1
+    if args.resume and args.save_ckpt:
+        found = find_resume_checkpoint(ckpt_dir, n_size, p0_type)
+        if found is not None:
+            ckpt_path, ckpt_step = found
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+            model.load_state_dict(ckpt["model_state_dict"])
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if "scheduler_state_dict" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            start_step = ckpt_step + 1
+            print(f"  [resume] tìm thấy {os.path.basename(ckpt_path)} (step={ckpt_step}) "
+                  f"-> tiếp tục từ step {start_step}")
+            if start_step > args.total_steps:
+                print(f"  [resume] đã train đủ {args.total_steps} step rồi -> BỎ QUA training, "
+                      f"dùng luôn checkpoint này.")
+                return model
+
     n = len(dataset)
     print(f"  preloading {n} images ({img_size}x{img_size}) to {device} ...")
     all_imgs = torch.stack([dataset[i] for i in range(n)]).to(device)   # [n,1,H,W]
 
     print(f"\n{'='*70}")
     print(f"n_data={n}  p0={p0_type}  img_size={img_size}  params={n_params:,}  "
-          f"total_steps={args.total_steps}  batch_size={args.batch_size}")
+          f"total_steps={args.total_steps}  batch_size={args.batch_size}  "
+          f"start_step={start_step}")
     print(f"{'='*70}")
 
     model.train()
     loss_window = []
     t0 = time.time()
-    for step in range(1, args.total_steps + 1):
+    for step in range(start_step, args.total_steps + 1):
         idx = torch.randint(0, n, (args.batch_size,), device=device)
         x_1 = all_imgs[idx]
         B = x_1.shape[0]
@@ -213,14 +261,23 @@ def train_one(dataset: ShapesDataset, p0_type: str, sigma, args, device,
             loss_window = []
 
         # ── Lưu checkpoint ĐỊNH KỲ trong lúc train (không chỉ lúc xong) — an toàn
-        # cho run dài trên GPU (crash/OOM giữa chừng không mất hết), và cho phép
-        # theo dõi tiến trình / trace sớm nếu cần ──────────────────────────────
+        # cho run dài trên GPU (crash/OOM giữa chừng không mất hết), cho phép
+        # resume, và cho phép theo dõi tiến trình / trace sớm nếu cần ──────────
         if args.save_ckpt and (step % args.save_every == 0) and step != args.total_steps:
             ckpt_path = os.path.join(ckpt_dir, f"unet_n{n_size}_{p0_type}_step{step:06d}.pt")
-            save_checkpoint(model, ckpt_path, n_data=n_size, p0_type=p0_type,
-                             img_size=img_size, epsilon=args.epsilon,
-                             step=step, total_steps=args.total_steps, loss=loss.item())
+            save_checkpoint(model, ckpt_path, optimizer=optimizer, scheduler=scheduler,
+                             n_data=n_size, p0_type=p0_type, img_size=img_size,
+                             epsilon=args.epsilon, step=step, total_steps=args.total_steps,
+                             loss=loss.item())
             print(f"  [checkpoint] Saved: {ckpt_path}")
+
+    if args.save_ckpt:
+        final_path = os.path.join(ckpt_dir, f"unet_n{n_size}_{p0_type}.pt")
+        save_checkpoint(model, final_path, optimizer=optimizer, scheduler=scheduler,
+                         n_data=n_size, p0_type=p0_type, img_size=img_size,
+                         epsilon=args.epsilon, step=args.total_steps,
+                         total_steps=args.total_steps)
+        print(f"  Saved (final): {final_path}")
 
     del all_imgs
     return model
@@ -319,6 +376,11 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=10000,
                    help="Luu checkpoint DINH KY moi save_every step trong luc train "
                         "(ngoai checkpoint cuoi cung luon duoc luu)")
+    p.add_argument("--resume", action="store_true", default=True,
+                   help="Tu dong tim checkpoint da co cho tung (size,p0) va TIEP TUC train "
+                        "tu do (hoac BO QUA training neu da du total_steps), mac dinh BAT")
+    p.add_argument("--no_resume", dest="resume", action="store_false",
+                   help="Luon train lai tu dau, khong quan tam checkpoint cu")
     return p.parse_args()
 
 
@@ -365,15 +427,9 @@ def main():
         for p0_type in p0_types:
             sigma = sigma_aniso if p0_type == "anisotropic" else None
 
+            # train_one tự lưu checkpoint định kỳ + cuối cùng (và tự resume nếu đã có)
             model = train_one(dataset, p0_type, sigma, args, device,
                                args.img_size, ckpt_dir, n_size)
-
-            if args.save_ckpt:
-                ckpt_path = os.path.join(ckpt_dir, f"unet_n{n_size}_{p0_type}.pt")
-                save_checkpoint(model, ckpt_path, n_data=n_size, p0_type=p0_type,
-                                 img_size=args.img_size, epsilon=args.epsilon,
-                                 total_steps=args.total_steps, step=args.total_steps)
-                print(f"  Saved (final): {ckpt_path}")
 
             print(f"\nSampling {args.n_sample_total} ảnh × {args.n_repeats} lần lặp "
                   f"(n={n_size}, p0={p0_type}, steps={args.sample_steps}) ...")

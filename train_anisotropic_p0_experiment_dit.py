@@ -329,6 +329,19 @@ def main():
     if args.img_size % args.patch_size != 0:
         raise ValueError(f"img_size={args.img_size} phải chia hết cho patch_size={args.patch_size}")
 
+    n_tokens = (args.img_size // args.patch_size) ** 2
+    print(f"n_tokens (grid {args.img_size//args.patch_size}x{args.img_size//args.patch_size}): {n_tokens}")
+    if n_tokens > 256:
+        approx_gib = args.batch_size * args.num_heads * n_tokens * n_tokens * 4 / (1024**3)
+        print(f"  CẢNH BÁO OOM: self-attention là O(n_tokens^2) -> {n_tokens} token/ảnh với "
+              f"batch_size={args.batch_size} có thể tốn RẤT NHIỀU VRAM (riêng 1 attention "
+              f"matrix ~{approx_gib:.1f} GiB, nhân thêm nhiều lớp trung gian cần giữ lại cho "
+              f"backward -> dễ CUDA OOM). Nếu OOM, thử 1 trong các cách sau:\n"
+              f"    (a) tăng --patch_size (vd 4 -> {(args.img_size//4)**2} token, giảm ~"
+              f"{(n_tokens/((args.img_size//4)**2))**2:.0f}x VRAM attention vì O(n^2)) — khuyến nghị trước tiên\n"
+              f"    (b) giảm --batch_size (vd còn {max(1, args.batch_size//8)})\n"
+              f"    (c) giảm --sample_batch_size tương ứng lúc sampling")
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ckpt_dir = os.path.join(OUTPUT_DIR, "checkpoints")
     if args.save_ckpt:
