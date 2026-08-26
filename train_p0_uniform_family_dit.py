@@ -132,10 +132,25 @@ def make_uniform_i_2i_bounds(img_size: int, device):
     return lo, hi
 
 
+# ── p0 #5: Uniform(0, 1 + (i/(D-1))*delta) — PHÁ ĐỐI XỨNG ĐƠN GIẢN NHẤT, cùng ý
+# tưởng sigma_i=1+i*epsilon đã dùng cho Gaussian dị hướng (train_anisotropic_p0_
+# experiment.py) nhưng áp cho ĐỘ RỘNG của Uniform. Tham số hoá theo delta = TỔNG độ
+# giãn ở chiều CUỐI (không phải theo-từng-bước như epsilon trước) -> max luôn =
+# 1+delta BẤT KỂ D, không cần tính "epsilon tương đương" theo img_size như lần
+# Gaussian trước. delta=0 -> chính là uniform01. Mọi chiều đều bắt đầu từ 0 (giống
+# uniform01), chỉ khác đúng 1 điểm: độ rộng tăng dần đều theo chỉ số chiều ─────
+def make_uniform_widen_bounds(img_size: int, delta: float, device):
+    d = IN_CHANNELS * img_size * img_size
+    idx = torch.arange(d, dtype=torch.float32, device=device)
+    hi = (1.0 + (idx / (d - 1)) * delta).view(1, IN_CHANNELS, img_size, img_size)
+    lo = torch.zeros_like(hi)
+    return lo, hi
+
+
 def sample_x0(B: int, p0_type: str, bounds, img_size: int, device) -> torch.Tensor:
     if p0_type == "uniform01":
         return sample_x0_uniform01(B, img_size, device)
-    elif p0_type in ("uniform_i2", "uniform_i_2i"):
+    elif p0_type in ("uniform_i2", "uniform_i_2i", "uniform_widen"):
         lo, hi = bounds
         return sample_x0_uniform_i2(B, lo, hi, device)
     elif p0_type == "gauss_i2":
@@ -337,12 +352,15 @@ def sample_and_analyze_repeated(model, p0_type: str, bounds, device, n_total: in
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="p0 uniform01 vs gauss_i2/uniform_i2 — DiT, 16/64x64, 5k/10k")
+    p = argparse.ArgumentParser(description="p0 uniform01 vs uniform_widen — DiT, 16/64x64, 5k/10k")
     p.add_argument("--img_sizes", type=str, default="16,64")
     p.add_argument("--dataset_sizes", type=str, default="5000,10000")
-    p.add_argument("--p0_types", type=str, default="uniform01,uniform_i_2i",
-                   help="Cac gia tri hop le: uniform01, uniform_i2, gauss_i2, uniform_i_2i "
-                        "(phan cach dau phay)")
+    p.add_argument("--p0_types", type=str, default="uniform01,uniform_widen",
+                   help="Cac gia tri hop le: uniform01, uniform_widen, uniform_i2, gauss_i2, "
+                        "uniform_i_2i (phan cach dau phay)")
+    p.add_argument("--widen_delta", type=float, default=0.5,
+                   help="uniform_widen: x0[i]~U(0, 1+(i/(D-1))*delta) -> max luon = 1+delta "
+                        "BAT KE img_size. delta=0 -> chinh la uniform01.")
     p.add_argument("--total_steps", type=str, default="16:40000,64:100000",
                    help="So gradient step. 1 so ap dung cho MOI img_size (vd '40000'), "
                         "hoac rieng tung img_size 'img:steps,...' (vd '16:40000,64:100000', "
@@ -423,6 +441,11 @@ def main():
             d = IN_CHANNELS * isz * isz
             print(f"  [uniform_i_2i @ img_size={isz}] D={d}  chiều đầu ~ U[0, 0] (suy biến)  "
                   f"chiều cuối ~ U[{d-1}, {2*(d-1)}]  (KHÔNG chuẩn hoá, quy mô nguyên bản i)")
+    if "uniform_widen" in p0_types:
+        for isz in img_sizes:
+            print(f"  [uniform_widen @ img_size={isz}] delta={args.widen_delta}  "
+                  f"chiều đầu ~ U[0, 1.0000]  chiều cuối ~ U[0, {1+args.widen_delta:.4f}]  "
+                  f"(= uniform01 nếu delta=0, max luôn = 1+delta bất kể img_size)")
 
     for isz in img_sizes:
         if isz % args.patch_size != 0:
@@ -452,6 +475,8 @@ def main():
             bounds_by_p0["gauss_i2"] = make_gauss_i2_params(img_size, device)
         if "uniform_i_2i" in p0_types:
             bounds_by_p0["uniform_i_2i"] = make_uniform_i_2i_bounds(img_size, device)
+        if "uniform_widen" in p0_types:
+            bounds_by_p0["uniform_widen"] = make_uniform_widen_bounds(img_size, args.widen_delta, device)
 
         for n_size in sizes:
             label = size_label(n_size)
