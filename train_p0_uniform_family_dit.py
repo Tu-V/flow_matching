@@ -99,12 +99,48 @@ def sample_x0_uniform_i2(B: int, lo: torch.Tensor, hi: torch.Tensor, device) -> 
     return lo + u * (hi - lo)
 
 
+# ── p0 #3: N(i^2, i^2+1) độc lập theo từng chiều i=0..D-1, CHUẨN HOÁ theo D^2 —
+# thay cho uniform_i2 (hallucination quá cao: 29% double_col ở img_size=16 so với
+# 1.56% của uniform01). Chia CẢ mean lẫn variance cho D^2 (cùng chuẩn hoá đã dùng
+# cho uniform_i2) -> mean_i=(i/D)^2 in [0,1], var_i=(i^2+1)/D^2 (>0 kể cả i=0, đúng
+# vai trò "+1" gốc: đảm bảo variance không suy biến về 0). LƯU Ý: ở chiều cuối
+# (i=D-1), var~1 (std~1) trong khi mean cũng ~1 -> phân phối RẤT loãng/overlap ở
+# các chiều cuối (khác hẳn uniform_i2 vốn bị CHẶN cứng trong [0,1]) — đây là hệ quả
+# tự nhiên của công thức N(i^2,i^2+1) khi chuẩn hoá, không phải lỗi.
+def make_gauss_i2_params(img_size: int, device):
+    d = IN_CHANNELS * img_size * img_size
+    idx = torch.arange(d, dtype=torch.float32, device=device)
+    mean = ((idx / d) ** 2).view(1, IN_CHANNELS, img_size, img_size)
+    var = ((idx ** 2 + 1) / d ** 2).view(1, IN_CHANNELS, img_size, img_size)
+    std = var.sqrt()
+    return mean, std
+
+
+def sample_x0_gauss_i2(B: int, mean: torch.Tensor, std: torch.Tensor, device) -> torch.Tensor:
+    z = torch.randn(B, *mean.shape[1:], device=device)
+    return mean + z * std
+
+
+# ── p0 #4: Uniform(i, 2i) độc lập theo từng chiều i=0..D-1 — KHÔNG chuẩn hoá
+# (quy mô vừa phải: max = 2*(D-1), VD 64x64 chỉ ~8190, không tràn số như bản i^2).
+# i=0 -> Uniform(0,0) suy biến (luôn =0, hợp lệ vì bề rộng=0) ─────────────────
+def make_uniform_i_2i_bounds(img_size: int, device):
+    d = IN_CHANNELS * img_size * img_size
+    idx = torch.arange(d, dtype=torch.float32, device=device)
+    lo = idx.view(1, IN_CHANNELS, img_size, img_size)
+    hi = (2 * idx).view(1, IN_CHANNELS, img_size, img_size)
+    return lo, hi
+
+
 def sample_x0(B: int, p0_type: str, bounds, img_size: int, device) -> torch.Tensor:
     if p0_type == "uniform01":
         return sample_x0_uniform01(B, img_size, device)
-    elif p0_type == "uniform_i2":
+    elif p0_type in ("uniform_i2", "uniform_i_2i"):
         lo, hi = bounds
         return sample_x0_uniform_i2(B, lo, hi, device)
+    elif p0_type == "gauss_i2":
+        mean, std = bounds
+        return sample_x0_gauss_i2(B, mean, std, device)
     raise ValueError(f"p0_type không hợp lệ: {p0_type}")
 
 
@@ -301,10 +337,12 @@ def sample_and_analyze_repeated(model, p0_type: str, bounds, device, n_total: in
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="p0 uniform01 vs uniform_i2 — DiT, 16/64x64, 5k/10k")
+    p = argparse.ArgumentParser(description="p0 uniform01 vs gauss_i2/uniform_i2 — DiT, 16/64x64, 5k/10k")
     p.add_argument("--img_sizes", type=str, default="16,64")
     p.add_argument("--dataset_sizes", type=str, default="5000,10000")
-    p.add_argument("--p0_types", type=str, default="uniform01,uniform_i2")
+    p.add_argument("--p0_types", type=str, default="uniform01,uniform_i_2i",
+                   help="Cac gia tri hop le: uniform01, uniform_i2, gauss_i2, uniform_i_2i "
+                        "(phan cach dau phay)")
     p.add_argument("--total_steps", type=str, default="16:40000,64:100000",
                    help="So gradient step. 1 so ap dung cho MOI img_size (vd '40000'), "
                         "hoac rieng tung img_size 'img:steps,...' (vd '16:40000,64:100000', "
@@ -372,6 +410,19 @@ def main():
             binlast_lo = ((d - 1) / d) ** 2
             print(f"  [uniform_i2 @ img_size={isz}] D={d}  chiều đầu ~ U[0, {bin0_hi:.2e}]  "
                   f"chiều cuối ~ U[{binlast_lo:.4f}, 1.0000]  (chuẩn hoá theo D^2, nằm gọn [0,1])")
+    if "gauss_i2" in p0_types:
+        for isz in img_sizes:
+            d = IN_CHANNELS * isz * isz
+            std0 = ((0 ** 2 + 1) / d ** 2) ** 0.5
+            meanlast = ((d - 1) / d) ** 2
+            stdlast = (((d - 1) ** 2 + 1) / d ** 2) ** 0.5
+            print(f"  [gauss_i2 @ img_size={isz}] D={d}  chiều đầu ~ N(0, {std0:.2e}^2)  "
+                  f"chiều cuối ~ N({meanlast:.4f}, {stdlast:.4f}^2)  (mean,var chuẩn hoá theo D^2)")
+    if "uniform_i_2i" in p0_types:
+        for isz in img_sizes:
+            d = IN_CHANNELS * isz * isz
+            print(f"  [uniform_i_2i @ img_size={isz}] D={d}  chiều đầu ~ U[0, 0] (suy biến)  "
+                  f"chiều cuối ~ U[{d-1}, {2*(d-1)}]  (KHÔNG chuẩn hoá, quy mô nguyên bản i)")
 
     for isz in img_sizes:
         if isz % args.patch_size != 0:
@@ -394,7 +445,13 @@ def main():
     results = []
     for img_size in img_sizes:
         args.total_steps = total_steps_by_size[img_size]
-        bounds_i2 = make_uniform_i2_bounds(img_size, device) if "uniform_i2" in p0_types else None
+        bounds_by_p0 = {}
+        if "uniform_i2" in p0_types:
+            bounds_by_p0["uniform_i2"] = make_uniform_i2_bounds(img_size, device)
+        if "gauss_i2" in p0_types:
+            bounds_by_p0["gauss_i2"] = make_gauss_i2_params(img_size, device)
+        if "uniform_i_2i" in p0_types:
+            bounds_by_p0["uniform_i_2i"] = make_uniform_i_2i_bounds(img_size, device)
 
         for n_size in sizes:
             label = size_label(n_size)
@@ -406,7 +463,7 @@ def main():
             print(f"\n### img_size={img_size}  size={n_size} ({len(dataset)} ảnh thật) — {data_dir}")
 
             for p0_type in p0_types:
-                bounds = bounds_i2 if p0_type == "uniform_i2" else None
+                bounds = bounds_by_p0.get(p0_type)
 
                 model = train_one(dataset, p0_type, bounds, args, device,
                                    img_size, ckpt_dir, n_size)
@@ -463,23 +520,25 @@ def main():
         print(line)
         lines.append(line)
 
-    if "uniform01" in p0_types and "uniform_i2" in p0_types:
+    other_p0_types = [p for p in p0_types if p != "uniform01"]
+    if "uniform01" in p0_types and other_p0_types:
         lines.append("")
         print()
-        for img_size in img_sizes:
-            for n_size in sizes:
-                u01 = next((r for r in results if r["img_size"] == img_size
-                            and r["n_data"] == n_size and r["p0_type"] == "uniform01"), None)
-                ui2 = next((r for r in results if r["img_size"] == img_size
-                            and r["n_data"] == n_size and r["p0_type"] == "uniform_i2"), None)
-                if u01 and ui2:
-                    rel = ("(giảm về 0)" if ui2["hall_rate_mean"] == 0 else
-                           f"({100*(ui2['hall_rate_mean']-u01['hall_rate_mean'])/max(u01['hall_rate_mean'],1e-12):+.1f}% tương đối)")
-                    line = (f"img={img_size} n={n_size}: "
-                            f"uniform01={u01['hall_rate_mean']:.4f}%±{u01['hall_rate_std']:.4f}%  ->  "
-                            f"uniform_i2={ui2['hall_rate_mean']:.4f}%±{ui2['hall_rate_std']:.4f}%  {rel}")
-                    print(line)
-                    lines.append(line)
+        for other in other_p0_types:
+            for img_size in img_sizes:
+                for n_size in sizes:
+                    u01 = next((r for r in results if r["img_size"] == img_size
+                                and r["n_data"] == n_size and r["p0_type"] == "uniform01"), None)
+                    o = next((r for r in results if r["img_size"] == img_size
+                              and r["n_data"] == n_size and r["p0_type"] == other), None)
+                    if u01 and o:
+                        rel = ("(giảm về 0)" if o["hall_rate_mean"] == 0 else
+                               f"({100*(o['hall_rate_mean']-u01['hall_rate_mean'])/max(u01['hall_rate_mean'],1e-12):+.1f}% tương đối)")
+                        line = (f"img={img_size} n={n_size}: "
+                                f"uniform01={u01['hall_rate_mean']:.4f}%±{u01['hall_rate_std']:.4f}%  ->  "
+                                f"{other}={o['hall_rate_mean']:.4f}%±{o['hall_rate_std']:.4f}%  {rel}")
+                        print(line)
+                        lines.append(line)
 
     summary_path = os.path.join(OUTPUT_DIR, "summary_p0_uniform_family_dit.txt")
     with open(summary_path, "w") as f:
