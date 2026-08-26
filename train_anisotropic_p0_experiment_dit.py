@@ -188,7 +188,7 @@ def train_one(dataset: ShapesDataset, p0_type: str, sigma, args, device,
 
         # ── Lưu checkpoint ĐỊNH KỲ trong lúc train (không chỉ lúc xong) ────────
         if args.save_ckpt and (step % args.save_every == 0) and step != args.total_steps:
-            ckpt_path = os.path.join(ckpt_dir, f"dit_n{n_size}_{p0_type}_step{step:06d}.pt")
+            ckpt_path = os.path.join(ckpt_dir, f"dit_n{n_size}_{p0_type}_img{img_size}_step{step:06d}.pt")
             save_checkpoint(model, ckpt_path, args, n_data=n_size, p0_type=p0_type,
                              img_size=img_size, epsilon=args.epsilon,
                              step=step, total_steps=args.total_steps, loss=loss.item())
@@ -366,7 +366,7 @@ def main():
                                args.img_size, ckpt_dir, n_size)
 
             if args.save_ckpt:
-                ckpt_path = os.path.join(ckpt_dir, f"dit_n{n_size}_{p0_type}.pt")
+                ckpt_path = os.path.join(ckpt_dir, f"dit_n{n_size}_{p0_type}_img{args.img_size}.pt")
                 save_checkpoint(model, ckpt_path, args, n_data=n_size, p0_type=p0_type,
                                  img_size=args.img_size, epsilon=args.epsilon,
                                  total_steps=args.total_steps, step=args.total_steps)
@@ -386,7 +386,7 @@ def main():
             results.append({"n_data": n_size, "p0_type": p0_type, **s})
 
             # lưu stats.txt riêng cho run này (per-repeat + mean/std)
-            run_dir = os.path.join(OUTPUT_DIR, f"n{n_size}_{p0_type}")
+            run_dir = os.path.join(OUTPUT_DIR, f"n{n_size}_{p0_type}_img{args.img_size}")
             os.makedirs(run_dir, exist_ok=True)
             with open(os.path.join(run_dir, "stats.txt"), "w") as f:
                 f.write(f"n_data={n_size}  p0_type={p0_type}  img_size={args.img_size}  "
@@ -440,7 +440,7 @@ def main():
                 print(line)
                 lines.append(line)
 
-    summary_path = os.path.join(OUTPUT_DIR, "summary_anisotropic_p0_dit.txt")
+    summary_path = os.path.join(OUTPUT_DIR, f"summary_anisotropic_p0_dit_img{args.img_size}.txt")
     with open(summary_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     print(f"\nSummary -> {summary_path}")
