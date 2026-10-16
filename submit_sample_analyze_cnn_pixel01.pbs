@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -P mb26
-#PBS -q dgxa100
+#PBS -q gpuhopper
 #PBS -l ncpus=16,ngpus=1,mem=128GB,walltime=04:00:00
 #PBS -l storage=scratch/mb26
 #PBS -m be
