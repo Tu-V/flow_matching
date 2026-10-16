@@ -40,6 +40,8 @@ IN_CHANNELS = 1
 DATASET_ROOT = os.path.join(
     REPO_ROOT, "..", "neurips-2024-diffusion-model-hallucination", "simple-datasets",
 )
+# OUTPUT_DIR thật sự được gán lại trong main() theo --tag (để chạy nhiều cấu hình
+# kiến trúc khác nhau mà không ghi đè lẫn nhau, vd bản lớn hơn dùng --tag _large)
 OUTPUT_DIR = os.path.join(REPO_ROOT, "shape_exp", "64_64", "dit_pixel01_isotropic_64x64_output")
 
 
@@ -158,6 +160,9 @@ def parse_args():
     p.add_argument("--sample_steps", type=int, default=100)
     p.add_argument("--sample_batch_size", type=int, default=512)
     p.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "mps", "cuda"])
+    p.add_argument("--tag", type=str, default="",
+                   help="Hậu tố thêm vào tên thư mục output (vd '_large') để chạy nhiều "
+                        "cấu hình kiến trúc khác nhau mà không ghi đè lẫn nhau")
     p.add_argument("--quick", action="store_true")
     a = p.parse_args()
     if a.quick:
@@ -171,6 +176,11 @@ def main():
     device = torch.device(a.device) if a.device != "auto" else torch.device(
         "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Device: {device}")
+
+    global OUTPUT_DIR
+    OUTPUT_DIR = os.path.join(REPO_ROOT, "shape_exp", "64_64",
+                               f"dit_pixel01_isotropic_64x64_output{a.tag}")
+    print(f"OUTPUT_DIR: {OUTPUT_DIR}")
 
     label = f"{a.n_data // 1000}k" if a.n_data % 1000 == 0 else str(a.n_data)
     data_dir = os.path.join(DATASET_ROOT, f"simple-shapes-{label}-{a.img_size}x{a.img_size}")
