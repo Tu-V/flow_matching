@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -P mb26
 #PBS -q gpuhopper
-#PBS -l ncpus=12,ngpus=1,mem=128GB,walltime=04:00:00
+#PBS -l ncpus=12,ngpus=1,mem=128GB,walltime=12:00:00
 #PBS -l storage=scratch/mb26
 #PBS -m be
 #PBS -l wd
@@ -10,4 +10,4 @@ module unload intel-compiler intel-mkl python python2 python3 hdf5
 module load python3/3.12.1 python3-as-python
 source /scratch/mb26/tv8394/py3.12/bin/activate
 
-python3 -u sample_analyze_cnn_pixel01.py --n_sample_total 100000 --sample_steps 100
+python3 -u sample_analyze_cnn_pixel01.py --n_sample_total 100000 --sample_steps 100 --n_repeats 5
