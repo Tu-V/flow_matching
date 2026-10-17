@@ -163,6 +163,11 @@ def parse_args():
     p.add_argument("--tag", type=str, default="",
                    help="Hậu tố thêm vào tên thư mục output (vd '_large') để chạy nhiều "
                         "cấu hình kiến trúc khác nhau mà không ghi đè lẫn nhau")
+    p.add_argument("--resume", action="store_true",
+                   help="Tim checkpoint step*.pt gan nhat trong checkpoints/ va tiep tuc "
+                        "tu do (chi khoi phuc model weight -- optimizer/scheduler state "
+                        "KHONG duoc luu truoc do nen se reset, scheduler duoc fast-forward "
+                        "cho khop LR tai step do)")
     p.add_argument("--quick", action="store_true")
     a = p.parse_args()
     if a.quick:
@@ -203,6 +208,30 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=a.total_steps, eta_min=a.lr * 0.1)
 
+    start_step = 1
+    if a.resume:
+        import glob
+        import re
+        step_ckpts = glob.glob(os.path.join(ckpt_dir, "dit_pixel01_isotropic_step*.pt"))
+        if step_ckpts:
+            def _step_num(p):
+                m = re.search(r"step(\d+)\.pt$", p)
+                return int(m.group(1)) if m else -1
+            latest = max(step_ckpts, key=_step_num)
+            latest_step = _step_num(latest)
+            ck = torch.load(latest, map_location=device, weights_only=True)
+            model.load_state_dict(ck["model_state_dict"])
+            start_step = latest_step + 1
+            for _ in range(latest_step):
+                scheduler.step()
+            print(f"  [resume] Tìm thấy {os.path.basename(latest)} (step={latest_step}) "
+                  f"-> tiếp tục từ step {start_step}  (lr hiện tại={optimizer.param_groups[0]['lr']:.2e})")
+        else:
+            print("  [resume] Không tìm thấy checkpoint nào, train từ đầu")
+        if start_step > a.total_steps:
+            print(f"  [resume] start_step={start_step} > total_steps={a.total_steps}, "
+                  f"đã train đủ -> bỏ qua training, dùng checkpoint hiện tại")
+
     n = len(dataset)
     print(f"  preloading {n} images to {device} ...")
     all_imgs = torch.stack([dataset[i] for i in range(n)]).to(device)   # [n,1,H,W], range [0,1]
@@ -210,13 +239,14 @@ def main():
 
     print(f"\n{'='*70}")
     print(f"n_data={n}  p0=isotropic  img_size={a.img_size}  arch=DiT  params={n_params:,}  "
-          f"total_steps={a.total_steps}  batch_size={a.batch_size}  pixel_range=[0,1]")
+          f"total_steps={a.total_steps}  batch_size={a.batch_size}  pixel_range=[0,1]  "
+          f"start_step={start_step}")
     print(f"{'='*70}")
 
     model.train()
     loss_window = []
     t0 = time.time()
-    for step in range(1, a.total_steps + 1):
+    for step in range(start_step, a.total_steps + 1):
         idx = torch.randint(0, n, (a.batch_size,), device=device)
         x_1 = all_imgs[idx]
         B = x_1.shape[0]
