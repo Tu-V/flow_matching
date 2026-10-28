@@ -50,11 +50,13 @@ from train_shapes_fm_dit import (                   # noqa: E402  (tái dùng bu
 IMG_SIZE = 16
 IN_CHANNELS = 3
 NUM_CLASSES = 7
-N_TRAIN = 10000
 
-LABELED_DATA_DIR = os.path.join(REPO_ROOT, "shapes_10k_labeled")
 OUTPUT_DIR_BASE = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_p0_cond_dit_output")
-OUTPUT_DIR = OUTPUT_DIR_BASE   # bị main() ghi đè nếu --class_drop_prob khác mặc định (0.2)
+OUTPUT_DIR = OUTPUT_DIR_BASE   # bị main() ghi đè nếu --n_train/--class_drop_prob khác mặc định
+
+
+def size_label(n: int) -> str:
+    return f"{n // 1000}k" if n % 1000 == 0 else str(n)
 
 
 # ── Dataset (giống bản UNet cond) ────────────────────────────────────────────
@@ -199,20 +201,20 @@ def save_checkpoint(model: DiTCond, ckpt_path: str, args, optimizer=None, **extr
     torch.save(state, ckpt_path)
 
 
-def find_resume_checkpoint(ckpt_dir: str, p0_type: str):
+def find_resume_checkpoint(ckpt_dir: str, p0_type: str, n_train: int):
     best_path, best_step = None, -1
-    final_path = os.path.join(ckpt_dir, f"dit_cond_n{N_TRAIN}_{p0_type}.pt")
+    final_path = os.path.join(ckpt_dir, f"dit_cond_n{n_train}_{p0_type}.pt")
     if os.path.isfile(final_path):
         ck = torch.load(final_path, map_location="cpu", weights_only=True)
         best_step, best_path = ck.get("step", 0), final_path
-    for p in glob.glob(os.path.join(ckpt_dir, f"dit_cond_n{N_TRAIN}_{p0_type}_step*.pt")):
+    for p in glob.glob(os.path.join(ckpt_dir, f"dit_cond_n{n_train}_{p0_type}_step*.pt")):
         m = re.search(r"_step(\d+)\.pt$", p)
         if m and int(m.group(1)) > best_step:
             best_step, best_path = int(m.group(1)), p
     return (best_path, best_step) if best_path is not None else None
 
 
-def train_one(dataset: LabeledShapesDataset, p0_type: str, sigma, args, device, ckpt_dir: str):
+def train_one(dataset: LabeledShapesDataset, p0_type: str, sigma, args, device, ckpt_dir: str, n_train: int):
     model = build_dit_cond(args).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     path = CondOTProbPath()
@@ -222,7 +224,7 @@ def train_one(dataset: LabeledShapesDataset, p0_type: str, sigma, args, device, 
 
     start_step = 1
     if args.resume and args.save_ckpt:
-        found = find_resume_checkpoint(ckpt_dir, p0_type)
+        found = find_resume_checkpoint(ckpt_dir, p0_type, n_train)
         if found is not None:
             ckpt_path, ckpt_step = found
             ck = torch.load(ckpt_path, map_location=device, weights_only=True)
@@ -277,14 +279,14 @@ def train_one(dataset: LabeledShapesDataset, p0_type: str, sigma, args, device, 
             loss_window = []
 
         if args.save_ckpt and (step % args.save_every == 0) and step != args.total_steps:
-            ckpt_path = os.path.join(ckpt_dir, f"dit_cond_n{N_TRAIN}_{p0_type}_step{step:06d}.pt")
+            ckpt_path = os.path.join(ckpt_dir, f"dit_cond_n{n_train}_{p0_type}_step{step:06d}.pt")
             save_checkpoint(model, ckpt_path, args, optimizer=optimizer, p0_type=p0_type,
                              epsilon=args.epsilon, step=step, total_steps=args.total_steps,
                              loss=loss.item())
             print(f"  [checkpoint] Saved: {ckpt_path}")
 
     if args.save_ckpt:
-        final_path = os.path.join(ckpt_dir, f"dit_cond_n{N_TRAIN}_{p0_type}.pt")
+        final_path = os.path.join(ckpt_dir, f"dit_cond_n{n_train}_{p0_type}.pt")
         save_checkpoint(model, final_path, args, optimizer=optimizer, p0_type=p0_type,
                          epsilon=args.epsilon, step=args.total_steps, total_steps=args.total_steps)
         print(f"  Saved (final): {final_path}")
@@ -349,7 +351,10 @@ def sample_and_analyze_repeated(model, sigma, all_labels_np, cfg_scale, device,
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Guided (CFG) isotropic vs anisotropic p0, DiT, 10K ảnh")
+    p = argparse.ArgumentParser(description="Guided (CFG) isotropic vs anisotropic p0, DiT")
+    p.add_argument("--n_train", type=int, default=10000,
+                   help="dùng thư mục shapes_{label}_labeled tương ứng (vd 10000 -> shapes_10k_labeled, "
+                        "75000 -> shapes_75k_labeled, ~10K ảnh/class)")
     p.add_argument("--p0_types", type=str, default="isotropic,anisotropic")
     p.add_argument("--epsilon", type=float, default=0.001,
                    help="sigma_i = 1+i*epsilon, i=0..D-1, D=IN_CHANNELS*img_size^2=768 (RGB)")
@@ -384,20 +389,25 @@ def parse_args():
 def main():
     global OUTPUT_DIR
     args = parse_args()
+    n_train = args.n_train
+    labeled_data_dir = os.path.join(REPO_ROOT, f"shapes_{size_label(n_train)}_labeled")
+    OUTPUT_DIR = OUTPUT_DIR_BASE
+    if n_train != 10000:
+        OUTPUT_DIR = f"{OUTPUT_DIR_BASE}_n{n_train}"
     if args.class_drop_prob != 0.2:
-        OUTPUT_DIR = f"{OUTPUT_DIR_BASE}_dropprob{args.class_drop_prob:g}"
+        OUTPUT_DIR = f"{OUTPUT_DIR}_dropprob{args.class_drop_prob:g}"
     p0_types = [s.strip() for s in args.p0_types.split(",")]
     device = torch.device("cuda" if torch.cuda.is_available() else
                            ("mps" if torch.backends.mps.is_available() else "cpu"))
     d = IN_CHANNELS * IMG_SIZE * IMG_SIZE
-    print(f"Device: {device}  img_size={IMG_SIZE}x{IMG_SIZE} RGB (D={d})  num_classes={NUM_CLASSES}")
+    print(f"Device: {device}  img_size={IMG_SIZE}x{IMG_SIZE} RGB (D={d})  num_classes={NUM_CLASSES}  n_train={n_train}")
     print(f"OUTPUT_DIR: {OUTPUT_DIR}")
     print(f"Arch: DiT  hidden_size={args.hidden_size}  depth={args.depth}  "
           f"num_heads={args.num_heads}  patch_size={args.patch_size}")
     print(f"p0 types: {p0_types}")
 
-    if not os.path.isdir(LABELED_DATA_DIR):
-        print(f"LỖI: không thấy {LABELED_DATA_DIR} -- chạy `python label_shapes_dataset_10k.py` trước.")
+    if not os.path.isdir(labeled_data_dir):
+        print(f"LỖI: không thấy {labeled_data_dir} -- chạy script label_shapes_dataset_{size_label(n_train)}.py trước.")
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -405,14 +415,14 @@ def main():
     if args.save_ckpt:
         os.makedirs(ckpt_dir, exist_ok=True)
 
-    dataset = LabeledShapesDataset(LABELED_DATA_DIR)
-    print(f"Dataset: {len(dataset)} ảnh thật ({LABELED_DATA_DIR})")
+    dataset = LabeledShapesDataset(labeled_data_dir)
+    print(f"Dataset: {len(dataset)} ảnh thật ({labeled_data_dir})")
     sigma_aniso = make_sigma(args.epsilon, device)
 
     results = []
     for p0_type in p0_types:
         sigma = sigma_aniso if p0_type == "anisotropic" else None
-        model = train_one(dataset, p0_type, sigma, args, device, ckpt_dir)
+        model = train_one(dataset, p0_type, sigma, args, device, ckpt_dir, n_train)
 
         print(f"\nSampling {args.n_sample_total} ảnh × {args.n_repeats} lần lặp "
               f"(p0={p0_type}, cfg_scale={args.sample_cfg_scale}, steps={args.sample_steps}) ...")
@@ -424,10 +434,10 @@ def main():
               f"double_col={s['double_rate_mean']:.3f}%±{s['double_rate_std']:.3f}%)")
         results.append({"p0_type": p0_type, **s})
 
-        run_dir = os.path.join(OUTPUT_DIR, f"n{N_TRAIN}_{p0_type}")
+        run_dir = os.path.join(OUTPUT_DIR, f"n{n_train}_{p0_type}")
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "stats.txt"), "w") as f:
-            f.write(f"n_data={N_TRAIN}  p0_type={p0_type}  img_size={IMG_SIZE}  epsilon={args.epsilon}  "
+            f.write(f"n_data={n_train}  p0_type={p0_type}  img_size={IMG_SIZE}  epsilon={args.epsilon}  "
                     f"num_classes={NUM_CLASSES}  sample_cfg_scale={args.sample_cfg_scale}\n")
             f.write(f"total_steps={args.total_steps}  n_sample_total/repeat={args.n_sample_total}  "
                     f"n_repeats={args.n_repeats}  sample_steps={args.sample_steps}\n\n")
@@ -442,7 +452,7 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    print(f"\n{'='*80}\nTỔNG HỢP (guided DiT, n={N_TRAIN}, cfg_scale={args.sample_cfg_scale})\n{'='*80}")
+    print(f"\n{'='*80}\nTỔNG HỢP (guided DiT, n={n_train}, cfg_scale={args.sample_cfg_scale})\n{'='*80}")
     header = (f"{'p0_type':>12s} {'hall% mean':>11s} {'hall% std':>10s} "
               f"{'empty% mean':>12s} {'double_col% mean':>17s}")
     print(header)
