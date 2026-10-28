@@ -1,0 +1,13 @@
+#!/bin/bash
+#PBS -P mb26
+#PBS -q gpuhopper
+#PBS -l ncpus=12,ngpus=1,mem=128GB,walltime=24:00:00
+#PBS -l storage=scratch/mb26
+#PBS -m be
+#PBS -l wd
+
+module purge
+module load python3/3.12.1 python3-as-python
+source /scratch/mb26/tv8394/py3.12/bin/activate
+
+python3 -u epsilon_sweep_delta_mij_unet16.py
