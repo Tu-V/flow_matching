@@ -10,4 +10,4 @@ module unload intel-compiler intel-mkl python python2 python3 hdf5
 module load python3/3.12.1 python3-as-python
 source /scratch/mb26/tv8394/py3.12/bin/activate
 
-python3 -u train_anisotropic_p0_experiment_dit.py
+python3 -u train_anisotropic_p0_experiment_dit.py --total_steps 100000
