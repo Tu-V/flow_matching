@@ -42,13 +42,15 @@ from hallucination_detector import analyze_batch, summarize   # noqa: E402
 
 IMG_SIZE = 16
 IN_CHANNELS = 1
-N_TRAIN = 10000
 
 DATASET_ROOT = os.path.join(
     REPO_ROOT, "..", "neurips-2024-diffusion-model-hallucination", "simple-datasets",
 )
-DATA_DIR = os.path.join(DATASET_ROOT, f"simple-shapes-10k-{IMG_SIZE}x{IMG_SIZE}")
-OUTPUT_DIR = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_sigma_ablation_output")
+OUTPUT_DIR_BASE = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_sigma_ablation_output")
+
+
+def size_label(n: int) -> str:
+    return f"{n // 1000}k" if n % 1000 == 0 else str(n)
 
 
 class ShapesDataset(Dataset):
@@ -100,7 +102,7 @@ def sample_x0(B: int, sigma: torch.Tensor, device) -> torch.Tensor:
     return torch.randn(B, IN_CHANNELS, IMG_SIZE, IMG_SIZE, device=device) * sigma
 
 
-def train_one(all_imgs: torch.Tensor, epsilon: float, sigma, args, device) -> UNetModel:
+def train_one(all_imgs: torch.Tensor, epsilon: float, sigma, args, device, n_train: int, output_dir: str) -> UNetModel:
     model = build_unet().to(device)
     n_params = sum(p.numel() for p in model.parameters())
     path = CondOTProbPath()
@@ -141,9 +143,9 @@ def train_one(all_imgs: torch.Tensor, epsilon: float, sigma, args, device) -> UN
             loss_window = []
 
     if args.save_ckpt:
-        ckpt_dir = os.path.join(OUTPUT_DIR, "checkpoints")
+        ckpt_dir = os.path.join(output_dir, "checkpoints")
         os.makedirs(ckpt_dir, exist_ok=True)
-        ckpt_path = os.path.join(ckpt_dir, f"unet_n{N_TRAIN}_eps{epsilon:g}.pt")
+        ckpt_path = os.path.join(ckpt_dir, f"unet_n{n_train}_eps{epsilon:g}.pt")
         torch.save({"model_state_dict": model.state_dict(), "epsilon": epsilon,
                     "sigma_max": sigma_max, "total_steps": args.total_steps}, ckpt_path)
         print(f"  Saved: {ckpt_path}")
@@ -200,7 +202,8 @@ def sample_and_analyze_repeated(model, sigma, device, n_total, steps, batch_size
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Ablation: sigma (epsilon) nào cho hallucination thấp nhất, UNet, 10K ảnh")
+    p = argparse.ArgumentParser(description="Ablation: sigma (epsilon) nào cho hallucination thấp nhất, UNet")
+    p.add_argument("--n_train", type=int, default=10000, help="5000 hoặc 10000 (dataset đã có sẵn ở 2 cỡ này)")
     p.add_argument("--epsilon_list", type=str, default="0,0.0001,0.0003,0.001,0.003,0.01,0.03,0.1")
     p.add_argument("--total_steps", type=int, default=40000)
     p.add_argument("--batch_size", type=int, default=128)
@@ -224,26 +227,30 @@ def parse_args():
 
 def main():
     args = parse_args()
+    n_train = args.n_train
+    output_dir = OUTPUT_DIR_BASE if n_train == 10000 else f"{OUTPUT_DIR_BASE}_n{n_train}"
+    data_dir = os.path.join(DATASET_ROOT, f"simple-shapes-{size_label(n_train)}-{IMG_SIZE}x{IMG_SIZE}")
     epsilons = [float(e) for e in args.epsilon_list.split(",")]
     device = torch.device("cuda" if torch.cuda.is_available() else
                            ("mps" if torch.backends.mps.is_available() else "cpu"))
-    print(f"Device: {device}  img_size={IMG_SIZE}x{IMG_SIZE} grayscale (D={IN_CHANNELS*IMG_SIZE*IMG_SIZE})")
+    print(f"Device: {device}  img_size={IMG_SIZE}x{IMG_SIZE} grayscale (D={IN_CHANNELS*IMG_SIZE*IMG_SIZE})  n_train={n_train}")
     print(f"epsilon_list: {epsilons}")
+    print(f"output_dir: {output_dir}")
 
-    if not os.path.isdir(DATA_DIR):
-        print(f"LỖI: không thấy {DATA_DIR}")
+    if not os.path.isdir(data_dir):
+        print(f"LỖI: không thấy {data_dir}")
         return
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    dataset = ShapesDataset(DATA_DIR)
-    print(f"Dataset: {len(dataset)} ảnh thật ({DATA_DIR})")
+    dataset = ShapesDataset(data_dir)
+    print(f"Dataset: {len(dataset)} ảnh thật ({data_dir})")
     all_imgs = torch.stack([dataset[i] for i in range(len(dataset))]).to(device)
 
     results = []
     for epsilon in epsilons:
         torch.manual_seed(args.seed)
         sigma = make_sigma(epsilon, device)
-        model = train_one(all_imgs, epsilon, sigma, args, device)
+        model = train_one(all_imgs, epsilon, sigma, args, device, n_train, output_dir)
 
         print(f"\nSampling {args.n_sample_total} ảnh × {args.n_repeats} lần lặp (epsilon={epsilon:g}) ...")
         s = sample_and_analyze_repeated(model, sigma, device, args.n_sample_total,
@@ -253,10 +260,10 @@ def main():
               f"double_col={s['double_rate_mean']:.3f}%±{s['double_rate_std']:.3f}%)")
         results.append({"epsilon": epsilon, "sigma_max": float(sigma.max().item()), **s})
 
-        run_dir = os.path.join(OUTPUT_DIR, f"n{N_TRAIN}_eps{epsilon:g}")
+        run_dir = os.path.join(output_dir, f"n{n_train}_eps{epsilon:g}")
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "stats.txt"), "w") as f:
-            f.write(f"n_data={N_TRAIN}  epsilon={epsilon:g}  sigma_max={sigma.max().item():.4f}  "
+            f.write(f"n_data={n_train}  epsilon={epsilon:g}  sigma_max={sigma.max().item():.4f}  "
                     f"img_size={IMG_SIZE}\n")
             f.write(f"total_steps={args.total_steps}  n_sample_total/repeat={args.n_sample_total}  "
                     f"n_repeats={args.n_repeats}  sample_steps={args.sample_steps}\n\n")
@@ -271,7 +278,7 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    print(f"\n{'='*90}\nTỔNG HỢP ABLATION epsilon/sigma (UNet, n={N_TRAIN})\n{'='*90}")
+    print(f"\n{'='*90}\nTỔNG HỢP ABLATION epsilon/sigma (UNet, n={n_train})\n{'='*90}")
     header = f"{'epsilon':>10s} {'sigma_max':>10s} {'hall% mean':>11s} {'hall% std':>10s} {'empty% mean':>12s} {'double_col% mean':>17s}"
     print(header)
     lines = [header]
@@ -287,7 +294,7 @@ def main():
     print(verdict)
     lines.append(verdict)
 
-    summary_path = os.path.join(OUTPUT_DIR, "summary_sigma_ablation_unet.txt")
+    summary_path = os.path.join(output_dir, "summary_sigma_ablation_unet.txt")
     with open(summary_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     print(f"\nSummary -> {summary_path}")
