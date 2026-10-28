@@ -6,7 +6,7 @@
 #PBS -m be
 #PBS -l wd
 
-module unload intel-compiler intel-mkl python python2 python3 hdf5
+module purge
 module load python3/3.12.1 python3-as-python
 source /scratch/mb26/tv8394/py3.12/bin/activate
 
