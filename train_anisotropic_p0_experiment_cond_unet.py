@@ -56,7 +56,8 @@ NUM_CLASSES = 7
 N_TRAIN = 10000   # cố định theo yêu cầu, KHÔNG quét nhiều cỡ dataset
 
 LABELED_DATA_DIR = os.path.join(REPO_ROOT, "shapes_10k_labeled")
-OUTPUT_DIR = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_p0_cond_output")
+OUTPUT_DIR_BASE = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_p0_cond_output")
+OUTPUT_DIR = OUTPUT_DIR_BASE   # bị main() ghi đè nếu --class_drop_prob khác mặc định (0.2)
 
 
 # ── Dataset (RGB, [-1,1], trả về (ảnh, label 0-indexed 0..6)) ────────────────
@@ -317,12 +318,16 @@ def parse_args():
 
 
 def main():
+    global OUTPUT_DIR
     args = parse_args()
+    if args.class_drop_prob != 0.2:
+        OUTPUT_DIR = f"{OUTPUT_DIR_BASE}_dropprob{args.class_drop_prob:g}"
     p0_types = [s.strip() for s in args.p0_types.split(",")]
     device = torch.device("cuda" if torch.cuda.is_available() else
                            ("mps" if torch.backends.mps.is_available() else "cpu"))
     d = IN_CHANNELS * IMG_SIZE * IMG_SIZE
     print(f"Device: {device}  img_size={IMG_SIZE}x{IMG_SIZE} RGB (D={d})  num_classes={NUM_CLASSES}")
+    print(f"OUTPUT_DIR: {OUTPUT_DIR}")
     print(f"p0 types: {p0_types}")
 
     if not os.path.isdir(LABELED_DATA_DIR):

@@ -53,7 +53,8 @@ NUM_CLASSES = 7
 N_TRAIN = 10000
 
 LABELED_DATA_DIR = os.path.join(REPO_ROOT, "shapes_10k_labeled")
-OUTPUT_DIR = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_p0_cond_dit_output")
+OUTPUT_DIR_BASE = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_p0_cond_dit_output")
+OUTPUT_DIR = OUTPUT_DIR_BASE   # bị main() ghi đè nếu --class_drop_prob khác mặc định (0.2)
 
 
 # ── Dataset (giống bản UNet cond) ────────────────────────────────────────────
@@ -381,12 +382,16 @@ def parse_args():
 
 
 def main():
+    global OUTPUT_DIR
     args = parse_args()
+    if args.class_drop_prob != 0.2:
+        OUTPUT_DIR = f"{OUTPUT_DIR_BASE}_dropprob{args.class_drop_prob:g}"
     p0_types = [s.strip() for s in args.p0_types.split(",")]
     device = torch.device("cuda" if torch.cuda.is_available() else
                            ("mps" if torch.backends.mps.is_available() else "cpu"))
     d = IN_CHANNELS * IMG_SIZE * IMG_SIZE
     print(f"Device: {device}  img_size={IMG_SIZE}x{IMG_SIZE} RGB (D={d})  num_classes={NUM_CLASSES}")
+    print(f"OUTPUT_DIR: {OUTPUT_DIR}")
     print(f"Arch: DiT  hidden_size={args.hidden_size}  depth={args.depth}  "
           f"num_heads={args.num_heads}  patch_size={args.patch_size}")
     print(f"p0 types: {p0_types}")
