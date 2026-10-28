@@ -3,19 +3,25 @@ Quét epsilon quanh vùng Δ (Thm 3.2, collapse -> "empty") và vùng M_ij (Thm 
 two-index -> "double_col") của checkpoint UNet 16x16 ĐÃ TRAIN
 shape_exp/unet_architecture/anisotropic_p0_output_16x16/checkpoints/unet_n5000_isotropic.pt.
 
-Ý tưởng: x0 = (điểm Δ hoặc điểm M_ij) + epsilon * N(0,I)  (nhiễu TOÀN ẢNH, không chỉ ở vùng
-template), epsilon quét từ 0 -> 1. Với mỗi epsilon: sample --n_sample_total ảnh, lặp lại
---n_repeats lần (x_init random khác nhau mỗi lần) để lấy mean/std của tỉ lệ hallucination.
-Vùng Δ CHỈ đếm loại "empty" (blank-shape). Vùng M_ij CHỈ đếm loại "double_col" (2 shape).
-Kỳ vọng: epsilon nhỏ -> gần đúng vùng lý thuyết -> tỉ lệ bắt được hallucination cao hơn.
+Ý tưởng: với mỗi epsilon, lấy x0 là 1 điểm ngẫu nhiên UNIFORM trong hình hộp
+[anchor - epsilon, anchor + epsilon] (mỗi pixel độc lập), anchor = điểm Δ hoặc điểm M_ij,
+epsilon quét từ 0 -> 1 (epsilon=0 = đúng anchor, không nhiễu). Với mỗi epsilon: sample
+--n_sample_total điểm x0 như trên, lặp lại --n_repeats lần để lấy mean/std của tỉ lệ
+hallucination. Vùng Δ CHỈ đếm loại "empty" (blank-shape). Vùng M_ij CHỈ đếm loại
+"double_col" (2 shape). Kỳ vọng: epsilon nhỏ -> gần đúng vùng lý thuyết -> tỉ lệ bắt được
+hallucination cao hơn.
 
-Xác định 2 điểm neo trước khi quét (rẻ, không tốn nhiều compute):
-  - Δ: c* = giá trị pixel trung bình của tập train thật (5000 ảnh, đã normalize [-1,1]).
-       x0_delta = c* * ones(1,16,16).
-  - M_ij: 2 "mode" = 2 vị trí triangle không chạm nhau trong CỘT 0 (hàng 1-3 và hàng 10-12,
-       cột 0-5). x0_mij = 0 khắp ảnh, trừ 2 vùng đó = A0 (B0=0, khớp giá trị trung bình của
-       N(0,I)). A0 được dò bằng 1 lưới thô (quét A, mỗi A thêm nhiễu nhỏ để đo tỉ lệ double_col,
-       chọn A cho tỉ lệ cao nhất) trước khi chạy sweep epsilon chính.
+Xác định 2 điểm neo (mỗi điểm chỉ cần là 1 ĐIỂM BẤT KỲ nằm trong vùng lý thuyết Δ / M_ij,
+không cần "tối ưu" gì cả vì cả vùng là fixed-point subspace -- điểm nào trong đó cũng
+tương đương về lý thuyết):
+  - Δ = {x : x_1 = x_2 = ... = x_D} (đường chéo, bất biến dưới hoán vị toạ độ).
+       Chọn điểm c* = giá trị pixel trung bình của tập train thật (5000 ảnh, normalize
+       [-1,1]) -> x0_delta = c* * ones(1,16,16). (Dùng c* thay vì 1 số tuỳ ý chỉ để điểm
+       neo "thực tế" hơn, không phải vì cần tối ưu.)
+  - M_ij = {x : x_i = x_j = A, x_k = B với mọi k khác i,j, A,B bất kỳ} (2 "mode" tại 2 vị
+       trí triangle không chạm nhau trong CỘT 0: hàng 1-3 và hàng 10-12, cột 0-5). Chọn
+       B0=0 (khớp trung bình N(0,I)) và A0=1.0 (1 điểm cụ thể đã biết chắc nằm trong vùng
+       hút của M_ij, từ khảo sát trước đó) -- không dò/tối ưu A0, chỉ cần 1 điểm hợp lệ.
 
 Usage:
     python epsilon_sweep_delta_mij_unet16.py                 # full (100k sample x 5 repeat x 2 vùng x 15 eps)
@@ -129,27 +135,6 @@ def compute_c_star(device) -> float:
     return float(imgs.mean().item())
 
 
-def calibrate_A0(solver, device, steps: int, n_calib: int, eps_calib: float, seed: int):
-    """Quét A0 thô (B0=0 cố định), mỗi A0 thêm nhiễu nhỏ (eps_calib) để đo tỉ lệ double_col,
-    chọn A0 cho tỉ lệ cao nhất. Rẻ: chỉ dùng n_calib mẫu/A0 (không phải n_sample_total)."""
-    g = torch.Generator(device="cpu").manual_seed(seed)
-    best_A, best_rate = 0.0, -1.0
-    log_lines = []
-    for A in torch.arange(-2.0, 2.01, 0.25):
-        base = torch.zeros(1, IN_CHANNELS, IMG_SIZE, IMG_SIZE)
-        for y_sl, x_sl in GROUP_BOXES:
-            base[:, :, y_sl, x_sl] = A
-        noise = torch.randn(n_calib, IN_CHANNELS, IMG_SIZE, IMG_SIZE, generator=g) * eps_calib
-        x0 = (base + noise).to(device)
-        x1 = sample_from_x0(solver, x0, steps)
-        analyses = analyze_batch(decode_to_uint8_rgb(x1))
-        rate = 100.0 * sum(1 for an in analyses if an["hall_type"] == "double_col") / len(analyses)
-        log_lines.append(f"  A0={A.item():+.2f}  B0=0  double_col%={rate:.1f}  (n={n_calib}, eps_calib={eps_calib})")
-        if rate > best_rate:
-            best_rate, best_A = rate, float(A.item())
-    return best_A, best_rate, log_lines
-
-
 def sweep_region(name: str, base_point: torch.Tensor, hall_type: str, solver, device,
                   steps: int, n_total: int, n_repeats: int, batch_size: int,
                   eps_list, seed: int, rep_fn):
@@ -165,7 +150,9 @@ def sweep_region(name: str, base_point: torch.Tensor, hall_type: str, solver, de
             n_done, n_hit = 0, 0
             while n_done < n_tot_eff:
                 B = min(batch_size, n_tot_eff - n_done)
-                noise = torch.randn(B, IN_CHANNELS, IMG_SIZE, IMG_SIZE, generator=g) * eps
+                # Uniform[-eps, eps] độc lập mỗi pixel -> x0 uniform trong hộp
+                # [anchor-eps, anchor+eps].
+                noise = (torch.rand(B, IN_CHANNELS, IMG_SIZE, IMG_SIZE, generator=g) * 2 - 1) * eps
                 x0 = (base_point + noise).to(device)
                 x1 = sample_from_x0(solver, x0, steps)
                 analyses = analyze_batch(decode_to_uint8_rgb(x1))
@@ -195,8 +182,6 @@ def parse_args():
     p.add_argument("--n_repeats", type=int, default=5)
     p.add_argument("--sample_steps", type=int, default=100)
     p.add_argument("--sample_batch_size", type=int, default=512)
-    p.add_argument("--n_calib", type=int, default=50)
-    p.add_argument("--eps_calib", type=float, default=0.1)
     p.add_argument("--eps_list", type=str,
                    default="0.0,0.01,0.02,0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0")
     p.add_argument("--seed", type=int, default=0)
@@ -204,7 +189,7 @@ def parse_args():
     p.add_argument("--quick", action="store_true", help="cấu hình siêu nhỏ để kiểm tra lỗi")
     a = p.parse_args()
     if a.quick:
-        a.n_sample_total, a.n_repeats, a.n_calib = 20, 2, 10
+        a.n_sample_total, a.n_repeats = 20, 2
         a.eps_list = "0.0,0.1,1.0"
         a.sample_steps = 10
     return a
@@ -233,30 +218,26 @@ def main():
         f"total_steps={ck.get('total_steps')}")
     solver = ODESolver(velocity_model=UNetVelocityWrapper(model))
 
-    # ── Xác định 2 điểm neo ──
+    # ── 2 điểm neo: 1 điểm bất kỳ trong Δ, 1 điểm bất kỳ trong M_ij (không tối ưu) ──
     c_star = compute_c_star(device)
-    rep(f"\n[calibration] c* (pixel trung bình tập train, thang [-1,1]) = {c_star:.4f}")
-    best_A0, best_rate, calib_log = calibrate_A0(
-        solver, device, args.sample_steps, args.n_calib, args.eps_calib, args.seed)
-    rep("[calibration] Quét A0 (B0=0, 2 vùng triangle hàng 1-3 & 10-12, cột 0-5):")
-    for line in calib_log:
-        rep(line)
-    rep(f"[calibration] => chọn A0={best_A0:+.2f}  (double_col%={best_rate:.1f} tại eps_calib={args.eps_calib})")
+    A0 = 1.0  # B0=0; A0=1.0 đã biết nằm trong vùng hút M_ij (double_col, từ khảo sát trước)
+    rep(f"\n[anchor] Δ: c* (pixel trung bình tập train, thang [-1,1]) = {c_star:.4f}")
+    rep(f"[anchor] M_ij: A0={A0:+.2f}  B0=0.00  (2 vùng triangle hàng 1-3 & 10-12, cột 0-5)")
 
     delta_point = torch.full((1, IN_CHANNELS, IMG_SIZE, IMG_SIZE), c_star)
     mij_point = torch.zeros(1, IN_CHANNELS, IMG_SIZE, IMG_SIZE)
     for y_sl, x_sl in GROUP_BOXES:
-        mij_point[:, :, y_sl, x_sl] = best_A0
+        mij_point[:, :, y_sl, x_sl] = A0
 
     eps_list = [float(e) for e in args.eps_list.split(",")]
     rep(f"\neps_list = {eps_list}")
 
-    rep(f"\n{'='*90}\n[Δ] x0 = c*·1 + eps·N(0,I)  -> chỉ đếm hall_type='empty'\n{'='*90}")
+    rep(f"\n{'='*90}\n[Δ] x0 ~ Uniform[c*·1 - eps, c*·1 + eps]  -> chỉ đếm hall_type='empty'\n{'='*90}")
     rows = sweep_region("delta", delta_point, "empty", solver, device, args.sample_steps,
                          args.n_sample_total, args.n_repeats, args.sample_batch_size,
                          eps_list, args.seed + 1, rep)
 
-    rep(f"\n{'='*90}\n[M_ij] x0 = (0 ngoài vùng, A0 trong 2 vùng) + eps·N(0,I)  "
+    rep(f"\n{'='*90}\n[M_ij] x0 ~ Uniform[mij_point - eps, mij_point + eps]  "
         f"-> chỉ đếm hall_type='double_col'\n{'='*90}")
     rows += sweep_region("mij", mij_point, "double_col", solver, device, args.sample_steps,
                           args.n_sample_total, args.n_repeats, args.sample_batch_size,
