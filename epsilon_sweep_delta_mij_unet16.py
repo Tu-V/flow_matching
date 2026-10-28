@@ -18,7 +18,7 @@ Xác định 2 điểm neo trước khi quét (rẻ, không tốn nhiều comput
        chọn A cho tỉ lệ cao nhất) trước khi chạy sweep epsilon chính.
 
 Usage:
-    python epsilon_sweep_delta_mij_unet16.py                 # full (10k sample x 5 repeat x 2 vùng x 15 eps)
+    python epsilon_sweep_delta_mij_unet16.py                 # full (100k sample x 5 repeat x 2 vùng x 15 eps)
     python epsilon_sweep_delta_mij_unet16.py --quick          # chạy thử cực nhanh (kiểm tra lỗi)
 """
 import argparse
@@ -159,7 +159,7 @@ def sweep_region(name: str, base_point: torch.Tensor, hall_type: str, solver, de
         is_exact = (eps == 0.0)
         n_rep_eff = 1 if is_exact else n_repeats
         n_tot_eff = 1 if is_exact else n_total
-        rates = []
+        rates, counts = [], []
         t0 = time.time()
         for rep in range(n_rep_eff):
             n_done, n_hit = 0, 0
@@ -171,21 +171,27 @@ def sweep_region(name: str, base_point: torch.Tensor, hall_type: str, solver, de
                 analyses = analyze_batch(decode_to_uint8_rgb(x1))
                 n_hit += sum(1 for an in analyses if an["hall_type"] == hall_type)
                 n_done += B
+            counts.append(n_hit)
             rates.append(100.0 * n_hit / n_tot_eff)
         mean, std = float(np.mean(rates)), (float(np.std(rates, ddof=1)) if n_rep_eff > 1 else 0.0)
-        rep_fn(f"  [{name}] eps={eps:<6g}  {hall_type}%% mean={mean:6.2f}  std={std:5.2f}  "
-               f"(n={n_tot_eff}, repeats={n_rep_eff}, rates={[f'{r:.2f}' for r in rates]}, "
+        count_mean = float(np.mean(counts))
+        count_std = float(np.std(counts, ddof=1)) if n_rep_eff > 1 else 0.0
+        rep_fn(f"  [{name}] eps={eps:<6g}  {hall_type} count mean={count_mean:8.1f} std={count_std:6.1f}  "
+               f"({hall_type}%% mean={mean:6.2f}  std={std:5.2f})  "
+               f"(n={n_tot_eff}, repeats={n_rep_eff}, counts={counts}, rates={[f'{r:.2f}' for r in rates]}, "
                f"elapsed={time.time()-t0:.0f}s)")
         rows.append({"region": name, "epsilon": eps, "hall_type": hall_type,
                      "n_total_per_repeat": n_tot_eff, "n_repeats": n_rep_eff,
+                     "count_mean": count_mean, "count_std": count_std,
                      "rate_mean": mean, "rate_std": std,
+                     "counts_list": ";".join(str(c) for c in counts),
                      "rates_list": ";".join(f"{r:.4f}" for r in rates)})
     return rows
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--n_sample_total", type=int, default=10000)
+    p.add_argument("--n_sample_total", type=int, default=100000)
     p.add_argument("--n_repeats", type=int, default=5)
     p.add_argument("--sample_steps", type=int, default=100)
     p.add_argument("--sample_batch_size", type=int, default=512)
@@ -259,7 +265,8 @@ def main():
     csv_path = os.path.join(OUT_DIR, "results.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["region", "epsilon", "hall_type", "n_total_per_repeat",
-                                           "n_repeats", "rate_mean", "rate_std", "rates_list"])
+                                           "n_repeats", "count_mean", "count_std", "rate_mean",
+                                           "rate_std", "counts_list", "rates_list"])
         w.writeheader()
         for row in rows:
             w.writerow(row)
