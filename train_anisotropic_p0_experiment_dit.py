@@ -68,7 +68,7 @@ IN_CHANNELS = 1   # ảnh gốc vốn grayscale (PIL mode "L"), R=G=B luôn -> b
 DATASET_ROOT = os.path.join(
     REPO_ROOT, "..", "neurips-2024-diffusion-model-hallucination", "simple-datasets",
 )
-OUTPUT_DIR = os.path.join(REPO_ROOT, "anisotropic_p0_dit_output")
+OUTPUT_DIR = os.path.join(REPO_ROOT, "shape_exp", "unet_architecture", "anisotropic_p0_dit_output")
 
 
 def size_label(n: int) -> str:
