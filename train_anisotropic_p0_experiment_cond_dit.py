@@ -236,6 +236,11 @@ def train_one(dataset: LabeledShapesDataset, p0_type: str, sigma, args, device, 
             if start_step > args.total_steps:
                 print(f"  [resume] đã đủ {args.total_steps} step -> bỏ qua training.")
                 return model
+            # scheduler mới tạo ở trên chưa biết đã train đến step nào -- fast-forward
+            # (start_step-1) bước để lr tiếp tục đúng vị trí trên cosine curve mới
+            # (T_max=args.total_steps có thể lớn hơn total_steps của lần train trước).
+            for _ in range(start_step - 1):
+                scheduler.step()
 
     n = len(dataset)
     print(f"  preloading {n} images ({IMG_SIZE}x{IMG_SIZE}, RGB) to {device} ...")
