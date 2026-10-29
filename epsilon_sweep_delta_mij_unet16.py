@@ -187,6 +187,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "mps", "cuda"])
     p.add_argument("--quick", action="store_true", help="cấu hình siêu nhỏ để kiểm tra lỗi")
+    p.add_argument("--out_suffix", type=str, default="",
+                    help="gắn vào tên thư mục output để không ghi đè lần chạy trước "
+                         "(vd '_large' -> epsilon_sweep_delta_mij_large)")
     a = p.parse_args()
     if a.quick:
         a.n_sample_total, a.n_repeats = 20, 2
@@ -201,8 +204,9 @@ def main():
         "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Device: {device}")
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-    report_path = os.path.join(OUT_DIR, "results.txt")
+    out_dir = OUT_DIR + args.out_suffix
+    os.makedirs(out_dir, exist_ok=True)
+    report_path = os.path.join(out_dir, "results.txt")
     report = open(report_path, "w")
 
     def rep(s=""):
@@ -243,7 +247,7 @@ def main():
                           args.n_sample_total, args.n_repeats, args.sample_batch_size,
                           eps_list, args.seed + 2, rep)
 
-    csv_path = os.path.join(OUT_DIR, "results.csv")
+    csv_path = os.path.join(out_dir, "results.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["region", "epsilon", "hall_type", "n_total_per_repeat",
                                            "n_repeats", "count_mean", "count_std", "rate_mean",
