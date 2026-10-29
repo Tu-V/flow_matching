@@ -35,8 +35,8 @@ import train_anisotropic_p0_experiment as unet_exp                              
 import train_anisotropic_p0_experiment_dit as dit_exp                            # noqa: E402
 from train_shapes_fm_dit import DiTVelocityWrapper                               # noqa: E402
 
+from scipy import linalg                                                         # noqa: E402
 from pytorch_fid.inception import InceptionV3                                    # noqa: E402
-from pytorch_fid.fid_score import calculate_frechet_distance                     # noqa: E402
 from prdc import compute_prdc                                                    # noqa: E402
 
 IMG_SIZE = 64
@@ -121,10 +121,30 @@ def inception_features(inception, imgs_01: torch.Tensor, device, batch_size: int
     return np.concatenate(feats, axis=0)
 
 
+def _sqrtm(mat: np.ndarray) -> np.ndarray:
+    # scipy >=1.13 bỏ tham số `disp` của linalg.sqrtm (và trả thẳng ma trận
+    # thay vì tuple (mat, errest)) -> tự xử lý cả 2 API để không phụ thuộc
+    # version scipy cụ thể trên máy local vs Gadi.
+    res = linalg.sqrtm(mat)
+    return res[0] if isinstance(res, tuple) else res
+
+
+def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps: float = 1e-6) -> float:
+    diff = mu1 - mu2
+    covmean = _sqrtm(sigma1.dot(sigma2))
+    if not np.isfinite(covmean).all():
+        offset = np.eye(sigma1.shape[0]) * eps
+        covmean = _sqrtm((sigma1 + offset).dot(sigma2 + offset))
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    tr_covmean = np.trace(covmean)
+    return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
+
+
 def fid_from_features(real_feats: np.ndarray, fake_feats: np.ndarray) -> float:
     mu1, sigma1 = real_feats.mean(axis=0), np.cov(real_feats, rowvar=False)
     mu2, sigma2 = fake_feats.mean(axis=0), np.cov(fake_feats, rowvar=False)
-    return float(calculate_frechet_distance(mu1, sigma1, mu2, sigma2))
+    return calculate_frechet_distance(mu1, sigma1, mu2, sigma2)
 
 
 def parse_args():
