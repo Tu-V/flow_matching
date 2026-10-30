@@ -172,8 +172,9 @@ def main():
         "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Device: {device}")
     steps_list = [int(s) for s in args.steps_list.split(",")]
-    os.makedirs(OUT_DIR, exist_ok=True)
-    report_path = os.path.join(OUT_DIR, "results.txt")
+    out_dir = os.path.join(OUT_DIR, f"nreal{args.n_real}_nsamp{args.n_samples}")
+    os.makedirs(out_dir, exist_ok=True)
+    report_path = os.path.join(out_dir, "results.txt")
     report = open(report_path, "w")
 
     def rep(s=""):
@@ -218,7 +219,7 @@ def main():
                          "n_real": real_feats.shape[0]})
         del wrapper
 
-    csv_path = os.path.join(OUT_DIR, "results.csv")
+    csv_path = os.path.join(out_dir, "results.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["arch", "p0_type", "steps", "FID", "precision",
                                            "recall", "density", "coverage", "n_samples", "n_real"])
