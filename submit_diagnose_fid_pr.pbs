@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -P mb26
+#PBS -q gpuhopper
+#PBS -l ncpus=12,ngpus=1,mem=64GB,walltime=00:30:00
+#PBS -l storage=scratch/mb26
+#PBS -m be
+#PBS -l wd
+
+module purge
+module load python3/3.12.1 python3-as-python
+source /scratch/mb26/tv8394/py3.12/bin/activate
+
+echo "=== GPU (cuda) ==="
+python3 -u diagnose_fid_pr.py --arch dit --p0_type anisotropic --steps 50 --n_real 1000 --n_fake 1000 --device cuda
+
+echo "=== CPU (same node) ==="
+python3 -u diagnose_fid_pr.py --arch dit --p0_type anisotropic --steps 50 --n_real 1000 --n_fake 1000 --device cpu
